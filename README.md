@@ -33,3 +33,8 @@ The application code and bundled logo are licensed under MIT. Barlow and Barlow 
 ## Live controls
 
 Material settings update the texture and PBR previews automatically after a short pause. The app waits briefly while a slider moves so it can build the latest setting without making the controls feel sluggish.
+
+## Recadrage
+
+Ouvre l’onglet **Recadrage** pour déplacer ou redimensionner la zone de sélection. Choisis une proportion libre, carrée, 4:3, 16:9 ou 2:3. Clique **Recadrer et appliquer** pour recalculer automatiquement les textures et cartes PBR.
+

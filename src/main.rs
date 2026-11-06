@@ -62,6 +62,10 @@ struct Studio {
     status: String,
     observed_controls: Settings,
     regen_at: Option<std::time::Instant>,
+    crop_tab: bool,
+    crop_rect: egui::Rect,
+    crop_ratio: usize,
+    crop_texture: Option<TextureHandle>,
 }
 fn load_source(path: &Path) -> Result<RgbImage, String> {
     let reader = ImageReader::open(path)
@@ -225,6 +229,10 @@ impl Studio {
             status: "Demo material loaded".into(),
             observed_controls: settings.clone(),
             regen_at: None,
+            crop_tab: false,
+            crop_rect: egui::Rect::from_min_max(egui::pos2(0.08, 0.08), egui::pos2(0.92, 0.92)),
+            crop_ratio: 0,
+            crop_texture: None,
         }
     }
     fn run(
@@ -267,6 +275,51 @@ impl Studio {
             }))
         })
     }
+    fn generate_crop(&mut self, ctx: &egui::Context) {
+        let src = self.surface.src.clone();
+        let settings = self.controls.clone();
+        let name = self.surface.name.clone();
+        let rect = self.crop_rect;
+        let ratio = [None, Some(1.), Some(4. / 3.), Some(16. / 9.), Some(2. / 3.)][self.crop_ratio];
+        self.run(
+            ctx,
+            "Cropping image and rebuilding material…",
+            move || {
+                let (width, height) = src.dimensions();
+                let mut left = (rect.left().clamp(0., 1.) * width as f32) as u32;
+                let mut top = (rect.top().clamp(0., 1.) * height as f32) as u32;
+                let mut right = (rect.right().clamp(0., 1.) * width as f32) as u32;
+                let mut bottom = (rect.bottom().clamp(0., 1.) * height as f32) as u32;
+                if let Some(ratio) = ratio {
+                    let mut w = right.saturating_sub(left).max(16);
+                    let mut h = bottom.saturating_sub(top).max(16);
+                    if w as f32 / h as f32 > ratio {
+                        w = (h as f32 * ratio) as u32;
+                    } else {
+                        h = (w as f32 / ratio) as u32;
+                    }
+                    left = left.saturating_add(right.saturating_sub(left).saturating_sub(w) / 2);
+                    top = top.saturating_add(bottom.saturating_sub(top).saturating_sub(h) / 2);
+                    right = left.saturating_add(w).min(width);
+                    bottom = top.saturating_add(h).min(height);
+                }
+                if right.saturating_sub(left) < 16 || bottom.saturating_sub(top) < 16 {
+                    return Err("Crop must be at least 16 × 16 pixels.".into());
+                }
+                let cropped = Arc::new(
+                    image::imageops::crop_imm(&*src, left, top, right - left, bottom - top)
+                        .to_image(),
+                );
+                let maps = Arc::new(material::build(&cropped, &settings));
+                Ok(Job::Surface(Surface {
+                    src: cropped,
+                    maps,
+                    name,
+                    settings,
+                }))
+            },
+        );
+    }
     fn refresh(&mut self, ctx: &egui::Context) {
         if self.texture.is_some() {
             return;
@@ -303,6 +356,11 @@ impl eframe::App for Studio {
                         self.surface = s;
                         self.texture = None;
                         self.thumb = None;
+                        self.crop_texture = None;
+                        self.crop_rect = egui::Rect::from_min_max(
+                            egui::pos2(0.08, 0.08),
+                            egui::pos2(0.92, 0.92),
+                        );
                         self.chips.clear();
                         self.status = "Material ready".into()
                     }
@@ -512,136 +570,314 @@ impl eframe::App for Studio {
                     .inner_margin(16),
             )
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (i, name) in ["Single tile", "3 × 3 repeat", "Lit sphere"]
-                        .iter()
-                        .enumerate()
-                    {
-                        if ui.selectable_label(self.view == i, *name).clicked() {
-                            self.view = i;
-                            self.texture = None;
-                        }
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(!self.crop_tab, "Material").clicked() {
+                        self.crop_tab = false;
                     }
-                    ui.separator();
-                    ui.monospace(format!("{:.0}%", self.cameras[self.view].scale * 100.));
-                    if ui
-                        .small_button("Fit")
-                        .on_hover_text("Reset zoom and pan")
-                        .clicked()
-                    {
-                        self.cameras[self.view] = Camera::default();
+                    if ui.selectable_label(self.crop_tab, "Recadrage").clicked() {
+                        self.crop_tab = true;
                     }
                 });
-                if self.view == 1 {
-                    ui.checkbox(&mut self.grid, "Show tile boundaries");
-                }
-                if self.view == 2 {
+                ui.separator();
+                if self.crop_tab {
+                    caption(ui, "RECADRER L’IMAGE SOURCE");
                     ui.horizontal(|ui| {
-                        ui.small("Light angle");
-                        if ui
-                            .add(egui::Slider::new(&mut self.angle, 0.05..=3.09).show_value(false))
-                            .changed()
-                        {
-                            self.texture = None;
+                        ui.label("Proportions");
+                        let ratio_changed = egui::ComboBox::from_id_salt("crop_ratio")
+                            .selected_text(["Libre", "1:1", "4:3", "16:9", "2:3"][self.crop_ratio])
+                            .show_ui(ui, |ui| {
+                                for (i, label) in
+                                    ["Libre", "1:1", "4:3", "16:9", "2:3"].iter().enumerate()
+                                {
+                                    ui.selectable_value(&mut self.crop_ratio, i, *label);
+                                }
+                            })
+                            .response
+                            .changed();
+                        if ratio_changed && self.crop_ratio != 0 {
+                            let ratios = [1., 1., 4. / 3., 16. / 9., 2. / 3.];
+                            let image_ratio =
+                                self.surface.src.width() as f32 / self.surface.src.height() as f32;
+                            let crop_ratio = ratios[self.crop_ratio] / image_ratio;
+                            let mut width = self.crop_rect.width().min(0.9);
+                            let mut height = width / crop_ratio;
+                            if height > 0.9 {
+                                height = 0.9;
+                                width = height * crop_ratio;
+                            }
+                            let center = self.crop_rect.center();
+                            let left = (center.x - width / 2.).clamp(0., 1. - width);
+                            let top = (center.y - height / 2.).clamp(0., 1. - height);
+                            self.crop_rect = egui::Rect::from_min_size(
+                                egui::pos2(left, top),
+                                egui::vec2(width, height),
+                            );
+                        }
+                        if ui.button("Réinitialiser").clicked() {
+                            self.crop_rect = egui::Rect::from_min_max(
+                                egui::pos2(0.08, 0.08),
+                                egui::pos2(0.92, 0.92),
+                            );
                         }
                     });
-                } else {
-                    ui.small(format!(
-                        "{}   /   {} × {} px",
-                        LABELS[self.layer],
-                        self.surface.maps[0].width(),
-                        self.surface.maps[0].height()
-                    ));
-                }
-                self.refresh(ctx);
-                let tex = self.texture.as_ref().unwrap();
-                let (rect, response) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), (ui.available_height() - 94.).max(60.)),
-                    egui::Sense::click_and_drag(),
-                );
-                let ratio = tex.size_vec2();
-                let size = ratio * ((rect.width() / ratio.x).min(rect.height() / ratio.y));
-                let camera = &mut self.cameras[self.view];
-                if response.hovered() {
-                    if let Some(pointer) = response.hover_pos() {
-                        camera.zoom(
-                            ui.input(|i| i.smooth_scroll_delta.y),
-                            pointer - rect.center(),
+                    if self.crop_texture.is_none() {
+                        let img = image::DynamicImage::ImageRgb8((*self.surface.src).clone())
+                            .thumbnail(1600, 1000)
+                            .to_rgb8();
+                        self.crop_texture = Some(texture(ctx, "crop-source", &img));
+                    }
+                    let tex = self.crop_texture.as_ref().unwrap();
+                    let (viewport, _) = ui.allocate_exact_size(
+                        Vec2::new(
+                            ui.available_width(),
+                            (ui.available_height() - 100.).max(100.),
+                        ),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let size = tex.size_vec2()
+                        * ((viewport.width() / tex.size_vec2().x)
+                            .min(viewport.height() / tex.size_vec2().y));
+                    let image_rect = egui::Rect::from_center_size(viewport.center(), size);
+                    ui.painter().image(
+                        tex.id(),
+                        image_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                        Color32::WHITE,
+                    );
+                    let selected = egui::Rect::from_min_max(
+                        image_rect.min + size * self.crop_rect.min.to_vec2(),
+                        image_rect.min + size * self.crop_rect.max.to_vec2(),
+                    );
+                    let painter = ui.painter_at(image_rect);
+                    for outside in [
+                        egui::Rect::from_min_max(
+                            image_rect.min,
+                            egui::pos2(image_rect.right(), selected.top()),
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::pos2(image_rect.left(), selected.bottom()),
+                            image_rect.max,
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::pos2(image_rect.left(), selected.top()),
+                            egui::pos2(selected.left(), selected.bottom()),
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::pos2(selected.right(), selected.top()),
+                            egui::pos2(image_rect.right(), selected.bottom()),
+                        ),
+                    ] {
+                        painter.rect_filled(outside, 0., Color32::from_black_alpha(165));
+                    }
+                    painter.rect_stroke(
+                        selected,
+                        0.,
+                        egui::Stroke::new(2., ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                    let handle =
+                        egui::Rect::from_center_size(selected.right_bottom(), Vec2::splat(20.));
+                    painter.rect_filled(handle, 3., ACCENT);
+                    let move_response =
+                        ui.interact(selected, ui.id().with("crop-move"), egui::Sense::drag());
+                    if move_response.dragged()
+                        && !handle
+                            .contains(move_response.interact_pointer_pos().unwrap_or_default())
+                    {
+                        let delta = move_response.drag_delta() / size;
+                        let width = self.crop_rect.width();
+                        let height = self.crop_rect.height();
+                        let left = (self.crop_rect.left() + delta.x).clamp(0., 1. - width);
+                        let top = (self.crop_rect.top() + delta.y).clamp(0., 1. - height);
+                        self.crop_rect = egui::Rect::from_min_size(
+                            egui::pos2(left, top),
+                            egui::vec2(width, height),
                         );
                     }
-                }
-                if response.dragged() {
-                    camera.offset += ui.input(|i| i.pointer.delta());
-                }
-                if response.double_clicked() {
-                    *camera = Camera::default();
-                }
-                camera.constrain(size, rect.size());
-                response.on_hover_text("Wheel to zoom · drag to pan · double-click to fit");
-                let painter = ui.painter_at(rect);
-                let target = egui::Rect::from_center_size(
-                    rect.center() + camera.offset,
-                    size * camera.scale,
-                );
-                let reps = if self.view == 1 { 3. } else { 1. };
-                painter.image(
-                    tex.id(),
-                    target,
-                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(reps, reps)),
-                    Color32::WHITE,
-                );
-                if self.view == 1 && self.grid {
-                    for i in [1., 2.] {
-                        let x = target.left() + target.width() * i / 3.;
-                        let y = target.top() + target.height() * i / 3.;
-                        for (a, b) in [
-                            (egui::pos2(x, target.top()), egui::pos2(x, target.bottom())),
-                            (egui::pos2(target.left(), y), egui::pos2(target.right(), y)),
-                        ] {
-                            painter.line_segment([a, b], (3., Color32::from_black_alpha(150)));
-                            painter.line_segment([a, b], (1., ACCENT));
+                    let resize_response =
+                        ui.interact(handle, ui.id().with("crop-resize"), egui::Sense::drag());
+                    if resize_response.dragged() {
+                        let delta = resize_response.drag_delta() / size;
+                        let mut right = (self.crop_rect.right() + delta.x)
+                            .clamp(self.crop_rect.left() + 0.05, 1.);
+                        let mut bottom = (self.crop_rect.bottom() + delta.y)
+                            .clamp(self.crop_rect.top() + 0.05, 1.);
+                        if self.crop_ratio != 0 {
+                            let ratios = [1., 1., 4. / 3., 16. / 9., 2. / 3.];
+                            let crop_ratio = ratios[self.crop_ratio]
+                                / (self.surface.src.width() as f32
+                                    / self.surface.src.height() as f32);
+                            if (right - self.crop_rect.left()) / (bottom - self.crop_rect.top())
+                                > crop_ratio
+                            {
+                                right = self.crop_rect.left()
+                                    + (bottom - self.crop_rect.top()) * crop_ratio;
+                            } else {
+                                bottom = self.crop_rect.top()
+                                    + (right - self.crop_rect.left()) / crop_ratio;
+                            }
                         }
+                        self.crop_rect.max = egui::pos2(right, bottom);
                     }
-                }
-                ui.add_space(6.);
-                ui.separator();
-                caption(ui, "TEXTURE MAPS");
-                if self.chips.is_empty() {
-                    self.chips = self
-                        .surface
-                        .maps
-                        .iter()
-                        .enumerate()
-                        .map(|(i, m)| {
-                            let (w, h) = m.dimensions();
-                            let d = w.min(h);
-                            let crop = image::imageops::crop_imm(m, (w - d) / 2, (h - d) / 2, d, d);
-                            let chip = image::imageops::thumbnail(&*crop, 32, 32);
-                            texture(ctx, &format!("map-chip-{i}"), &chip)
-                        })
-                        .collect();
-                }
-                ui.horizontal_wrapped(|ui| {
-                    for (i, name) in LABELS.iter().enumerate() {
-                        if ui
-                            .add(
-                                egui::Button::image_and_text(
-                                    egui::Image::new(&self.chips[i])
-                                        .fit_to_exact_size(Vec2::splat(19.)),
-                                    *name,
+                    ui.label(format!(
+                        "Sélection : {:.0}% × {:.0}% de l’image",
+                        self.crop_rect.width() * 100.,
+                        self.crop_rect.height() * 100.
+                    ));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            "Déplace la zone. Fais glisser le coin cyan pour la redimensionner.",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("Recadrer et appliquer")
+                                        .fill(ACCENT)
+                                        .stroke(egui::Stroke::NONE),
                                 )
-                                .selected(self.layer == i && self.view != 2),
-                            )
+                                .clicked()
+                            {
+                                self.generate_crop(ctx);
+                            }
+                        });
+                    });
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, name) in ["Single tile", "3 × 3 repeat", "Lit sphere"]
+                            .iter()
+                            .enumerate()
+                        {
+                            if ui.selectable_label(self.view == i, *name).clicked() {
+                                self.view = i;
+                                self.texture = None;
+                            }
+                        }
+                        ui.separator();
+                        ui.monospace(format!("{:.0}%", self.cameras[self.view].scale * 100.));
+                        if ui
+                            .small_button("Fit")
+                            .on_hover_text("Reset zoom and pan")
                             .clicked()
                         {
-                            self.layer = i;
-                            if self.view == 2 {
-                                self.view = 0
+                            self.cameras[self.view] = Camera::default();
+                        }
+                    });
+                    if self.view == 1 {
+                        ui.checkbox(&mut self.grid, "Show tile boundaries");
+                    }
+                    if self.view == 2 {
+                        ui.horizontal(|ui| {
+                            ui.small("Light angle");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.angle, 0.05..=3.09)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                self.texture = None;
                             }
-                            self.texture = None;
+                        });
+                    } else {
+                        ui.small(format!(
+                            "{}   /   {} × {} px",
+                            LABELS[self.layer],
+                            self.surface.maps[0].width(),
+                            self.surface.maps[0].height()
+                        ));
+                    }
+                    self.refresh(ctx);
+                    let tex = self.texture.as_ref().unwrap();
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), (ui.available_height() - 94.).max(60.)),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let ratio = tex.size_vec2();
+                    let size = ratio * ((rect.width() / ratio.x).min(rect.height() / ratio.y));
+                    let camera = &mut self.cameras[self.view];
+                    if response.hovered() {
+                        if let Some(pointer) = response.hover_pos() {
+                            camera.zoom(
+                                ui.input(|i| i.smooth_scroll_delta.y),
+                                pointer - rect.center(),
+                            );
                         }
                     }
-                });
+                    if response.dragged() {
+                        camera.offset += ui.input(|i| i.pointer.delta());
+                    }
+                    if response.double_clicked() {
+                        *camera = Camera::default();
+                    }
+                    camera.constrain(size, rect.size());
+                    response.on_hover_text("Wheel to zoom · drag to pan · double-click to fit");
+                    let painter = ui.painter_at(rect);
+                    let target = egui::Rect::from_center_size(
+                        rect.center() + camera.offset,
+                        size * camera.scale,
+                    );
+                    let reps = if self.view == 1 { 3. } else { 1. };
+                    painter.image(
+                        tex.id(),
+                        target,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(reps, reps)),
+                        Color32::WHITE,
+                    );
+                    if self.view == 1 && self.grid {
+                        for i in [1., 2.] {
+                            let x = target.left() + target.width() * i / 3.;
+                            let y = target.top() + target.height() * i / 3.;
+                            for (a, b) in [
+                                (egui::pos2(x, target.top()), egui::pos2(x, target.bottom())),
+                                (egui::pos2(target.left(), y), egui::pos2(target.right(), y)),
+                            ] {
+                                painter.line_segment([a, b], (3., Color32::from_black_alpha(150)));
+                                painter.line_segment([a, b], (1., ACCENT));
+                            }
+                        }
+                    }
+                    ui.add_space(6.);
+                    ui.separator();
+                    caption(ui, "TEXTURE MAPS");
+                    if self.chips.is_empty() {
+                        self.chips = self
+                            .surface
+                            .maps
+                            .iter()
+                            .enumerate()
+                            .map(|(i, m)| {
+                                let (w, h) = m.dimensions();
+                                let d = w.min(h);
+                                let crop =
+                                    image::imageops::crop_imm(m, (w - d) / 2, (h - d) / 2, d, d);
+                                let chip = image::imageops::thumbnail(&*crop, 32, 32);
+                                texture(ctx, &format!("map-chip-{i}"), &chip)
+                            })
+                            .collect();
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, name) in LABELS.iter().enumerate() {
+                            if ui
+                                .add(
+                                    egui::Button::image_and_text(
+                                        egui::Image::new(&self.chips[i])
+                                            .fit_to_exact_size(Vec2::splat(19.)),
+                                        *name,
+                                    )
+                                    .selected(self.layer == i && self.view != 2),
+                                )
+                                .clicked()
+                            {
+                                self.layer = i;
+                                if self.view == 2 {
+                                    self.view = 0
+                                }
+                                self.texture = None;
+                            }
+                        }
+                    });
+                }
             });
     }
 }
