@@ -4,7 +4,7 @@ Download the executable from [Releases](https://github.com/wasnas/quby-seemdisso
 
 1. Import a PNG, JPEG, WebP, TIFF or BMP, or drop it onto the window.
 2. Choose **3 × 3 repeat** to inspect the joins. Increase seam overlap if the source has uneven edges. The overlap is cropped out, so a stronger overlap yields a smaller tile.
-3. Set relief strength, roughness and metallic. Use **Invert height** when bright areas should recede. Choose DirectX normals when your renderer expects −Y. Click **Apply changes**.
+3. Set relief strength, roughness and metallic. Use **Invert height** when bright areas should recede. Choose DirectX normals when your renderer expects −Y. Material previews update automatically as controls change.
 4. Inspect each map or rotate the light on the sphere. **Export PBR set** writes a fresh numbered folder containing seven PNGs.
 
 Use sRGB for base color. Use non-color/linear data for normal, roughness, height, AO, metallic and ORM. The normal map uses tangent space. Connect it through a normal-map node. Packed ORM uses red for occlusion, green for roughness, and blue for metallic.
@@ -28,3 +28,8 @@ Hover over the single tile, 3 × 3 repeat, or sphere and scroll to zoom between 
 ## License
 
 The application code and bundled logo are licensed under MIT. Barlow and Barlow Semi Condensed are distributed under the SIL Open Font License. Their notices are included in `assets/fonts`.
+
+
+## Live controls
+
+Material settings update the texture and PBR previews automatically after a short pause. The app waits briefly while a slider moves so it can build the latest setting without making the controls feel sluggish.

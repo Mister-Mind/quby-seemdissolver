@@ -60,6 +60,8 @@ struct Studio {
     thumb: Option<TextureHandle>,
     worker: Option<mpsc::Receiver<Result<Job, String>>>,
     status: String,
+    observed_controls: Settings,
+    regen_at: Option<std::time::Instant>,
 }
 fn load_source(path: &Path) -> Result<RgbImage, String> {
     let reader = ImageReader::open(path)
@@ -156,29 +158,18 @@ fn artwork() -> image::RgbaImage {
 impl Studio {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut fonts = egui::FontDefinitions::default();
-        for (name, bytes) in [
-            (
-                "Barlow",
-                include_bytes!("../assets/fonts/Barlow-Regular.ttf").as_slice(),
-            ),
-            (
-                "Barlow display",
-                include_bytes!("../assets/fonts/BarlowSemiCondensed-SemiBold.ttf").as_slice(),
-            ),
-        ] {
+        for (name, bytes) in [(
+            "Barlow display",
+            include_bytes!("../assets/fonts/BarlowSemiCondensed-SemiBold.ttf").as_slice(),
+        )] {
             fonts
                 .font_data
                 .insert(name.into(), egui::FontData::from_static(bytes).into());
         }
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "Barlow".into());
         let display = egui::FontFamily::Name("Display".into());
-        let mut fallback = fonts.families[&egui::FontFamily::Proportional].clone();
-        fallback.insert(0, "Barlow display".into());
-        fonts.families.insert(display.clone(), fallback);
+        let mut title_font = fonts.families[&egui::FontFamily::Proportional].clone();
+        title_font.insert(0, "Barlow display".into());
+        fonts.families.insert(display.clone(), title_font);
         cc.egui_ctx.set_fonts(fonts);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(10., 8.);
@@ -224,7 +215,7 @@ impl Studio {
                 name: "Strata sandstone".into(),
                 settings: settings.clone(),
             },
-            controls: settings,
+            controls: settings.clone(),
             layer: 0,
             view: 2,
             angle: 0.92,
@@ -232,6 +223,8 @@ impl Studio {
             thumb: None,
             worker: None,
             status: "Demo material loaded".into(),
+            observed_controls: settings.clone(),
+            regen_at: None,
         }
     }
     fn run(
@@ -307,7 +300,6 @@ impl eframe::App for Studio {
                 self.worker = None;
                 match r {
                     Ok(Job::Surface(s)) => {
-                        self.controls = s.settings.clone();
                         self.surface = s;
                         self.texture = None;
                         self.thumb = None;
@@ -319,8 +311,24 @@ impl eframe::App for Studio {
                 }
             }
         }
+        if self.controls != self.observed_controls {
+            self.observed_controls = self.controls.clone();
+            self.regen_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(180));
+        }
         let busy = self.worker.is_some();
         let dirty = self.controls != self.surface.settings;
+        if dirty
+            && !busy
+            && self
+                .regen_at
+                .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.regen_at = None;
+            self.generate(ctx, None);
+        }
+        if self.regen_at.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        }
         if !busy {
             if let Some(path) =
                 ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
@@ -388,7 +396,14 @@ impl eframe::App for Studio {
                 if busy {
                     ui.spinner();
                 }
-                ui.label(RichText::new(&self.status).size(12.));
+                ui.label(
+                    RichText::new(if dirty && !busy {
+                        "Updating material..."
+                    } else {
+                        &self.status
+                    })
+                    .size(12.),
+                );
             });
         });
         egui::SidePanel::left("source")
@@ -430,7 +445,7 @@ impl eframe::App for Studio {
                     ui.add_space(6.);
                     ui.separator();
                     caption(ui, "SEAM CONTROLS");
-                    ui.add_enabled_ui(!busy, |ui| {
+                    ui.add_enabled_ui(true, |ui| {
                         use material::Method;
                         egui::ComboBox::from_id_salt("seam_method")
                             .selected_text(self.controls.method.label())
@@ -487,15 +502,6 @@ impl eframe::App for Studio {
                         }
                         ui.checkbox(&mut self.controls.invert, "Invert height");
                         ui.checkbox(&mut self.controls.dx, "DirectX normals (−Y)");
-                        if ui
-                            .add_enabled(
-                                self.controls != self.surface.settings,
-                                egui::Button::new("Apply changes"),
-                            )
-                            .clicked()
-                        {
-                            self.generate(ctx, None)
-                        }
                     });
                 });
             });
