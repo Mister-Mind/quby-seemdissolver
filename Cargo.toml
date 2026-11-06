@@ -1,0 +1,14 @@
+[package]
+name = "quby-seemdissolver"
+version = "1.2.0"
+license = "MIT"
+description = "Offline seamless texture and PBR material editor"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts","glow"] }
+image = { version = "0.25", default-features = false, features = ["png","jpeg","bmp","tiff","webp"] }
+rfd = "0.15"
+
+[profile.dev]
+debug = 0
