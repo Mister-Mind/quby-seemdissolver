@@ -12,6 +12,13 @@ use std::{
 
 const ACCENT: Color32 = Color32::from_rgb(157, 210, 210);
 const MUTED: Color32 = Color32::from_rgb(166, 171, 186);
+fn lang(french: bool, english: &'static str, français: &'static str) -> &'static str {
+    if french {
+        français
+    } else {
+        english
+    }
+}
 struct Surface {
     src: Arc<RgbImage>,
     maps: Arc<Vec<RgbImage>>,
@@ -66,6 +73,7 @@ struct Studio {
     crop_rect: egui::Rect,
     crop_ratio: usize,
     crop_texture: Option<TextureHandle>,
+    french: bool,
 }
 fn load_source(path: &Path) -> Result<RgbImage, String> {
     let reader = ImageReader::open(path)
@@ -145,14 +153,7 @@ fn texture(ctx: &egui::Context, id: &str, img: &RgbImage) -> TextureHandle {
     )
 }
 fn caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .font(egui::FontId::new(
-                13.,
-                egui::FontFamily::Name("Display".into()),
-            ))
-            .color(MUTED),
-    );
+    ui.label(RichText::new(text).color(MUTED));
 }
 fn artwork() -> image::RgbaImage {
     image::load_from_memory(include_bytes!("../assets/mark.png"))
@@ -161,20 +162,6 @@ fn artwork() -> image::RgbaImage {
 }
 impl Studio {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut fonts = egui::FontDefinitions::default();
-        for (name, bytes) in [(
-            "Barlow display",
-            include_bytes!("../assets/fonts/BarlowSemiCondensed-SemiBold.ttf").as_slice(),
-        )] {
-            fonts
-                .font_data
-                .insert(name.into(), egui::FontData::from_static(bytes).into());
-        }
-        let display = egui::FontFamily::Name("Display".into());
-        let mut title_font = fonts.families[&egui::FontFamily::Proportional].clone();
-        title_font.insert(0, "Barlow display".into());
-        fonts.families.insert(display.clone(), title_font);
-        cc.egui_ctx.set_fonts(fonts);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(10., 8.);
         style.spacing.button_padding = Vec2::new(12., 7.);
@@ -185,16 +172,6 @@ impl Studio {
         style.visuals.widgets.hovered.fg_stroke.color = Color32::from_rgb(219, 211, 235);
         style.visuals.widgets.active.fg_stroke.color = ACCENT;
         style.visuals.hyperlink_color = ACCENT;
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            egui::FontId::new(26., display.clone()),
-        );
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::new(16., display));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
         cc.egui_ctx.set_style(style);
         let mark = artwork();
         let logo = cc.egui_ctx.load_texture(
@@ -226,13 +203,19 @@ impl Studio {
             texture: None,
             thumb: None,
             worker: None,
-            status: "Demo material loaded".into(),
+            status: lang(
+                false,
+                "Demo material loaded",
+                "Matériau de démonstration chargé",
+            )
+            .into(),
             observed_controls: settings.clone(),
             regen_at: None,
             crop_tab: false,
             crop_rect: egui::Rect::from_min_max(egui::pos2(0.08, 0.08), egui::pos2(0.92, 0.92)),
             crop_ratio: 0,
             crop_texture: None,
+            french: false,
         }
     }
     fn run(
@@ -362,7 +345,7 @@ impl eframe::App for Studio {
                             egui::pos2(0.92, 0.92),
                         );
                         self.chips.clear();
-                        self.status = "Material ready".into()
+                        self.status = lang(self.french, "Material ready", "Matériau prêt").into()
                     }
                     Ok(Job::Saved(p)) => self.status = format!("Exported to {}", p.display()),
                     Err(e) => self.status = e,
@@ -400,23 +383,47 @@ impl eframe::App for Studio {
                 ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(44.)));
                 ui.heading("quby seemdissolver");
                 ui.separator();
-                ui.label(RichText::new("Material studio").color(MUTED));
+                ui.label(
+                    RichText::new(lang(self.french, "Material studio", "Atelier de matériaux"))
+                        .color(MUTED),
+                );
+                if ui
+                    .add_sized(
+                        Vec2::new(34., 22.),
+                        egui::Button::new(if self.french { "FR" } else { "EN" }),
+                    )
+                    .clicked()
+                {
+                    self.french = !self.french;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add_enabled(
                             !busy && !dirty,
                             egui::Button::new(
-                                RichText::new("Export PBR set")
-                                    .strong()
-                                    .color(Color32::BLACK),
+                                RichText::new(lang(
+                                    self.french,
+                                    "Export PBR set",
+                                    "Exporter le lot PBR",
+                                ))
+                                .strong()
+                                .color(Color32::BLACK),
                             )
                             .fill(ACCENT),
                         )
-                        .on_hover_text("Write seven PNG maps into a new folder")
+                        .on_hover_text(lang(
+                            self.french,
+                            "Write seven PNG maps into a new folder",
+                            "Enregistrer les sept cartes PNG dans un nouveau dossier",
+                        ))
                         .clicked()
                     {
                         if let Some(p) = rfd::FileDialog::new()
-                            .set_title("Choose parent folder for material")
+                            .set_title(lang(
+                                self.french,
+                                "Choose parent folder for material",
+                                "Choisir le dossier de destination",
+                            ))
                             .pick_folder()
                         {
                             let maps = self.surface.maps.clone();
@@ -456,7 +463,11 @@ impl eframe::App for Studio {
                 }
                 ui.label(
                     RichText::new(if dirty && !busy {
-                        "Updating material..."
+                        lang(
+                            self.french,
+                            "Updating material...",
+                            "Mise à jour du matériau…",
+                        )
                     } else {
                         &self.status
                     })
@@ -470,7 +481,7 @@ impl eframe::App for Studio {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(12.);
-                    caption(ui, "SOURCE IMAGE");
+                    caption(ui, lang(self.french, "SOURCE IMAGE", "IMAGE SOURCE"));
                     ui.heading(&self.surface.name);
                     if self.thumb.is_none() {
                         let img = image::DynamicImage::ImageRgb8((*self.surface.src).clone())
@@ -486,13 +497,20 @@ impl eframe::App for Studio {
                         self.surface.src.height()
                     ));
                     if ui
-                        .add_enabled(!busy, egui::Button::new("Import image…"))
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(lang(
+                                self.french,
+                                "Import image…",
+                                "Importer une image…",
+                            )),
+                        )
                         .on_hover_text("Or drop an image onto this window")
                         .clicked()
                     {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter(
-                                "Texture image",
+                                lang(self.french, "Texture image", "Image de texture"),
                                 &["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"],
                             )
                             .pick_file()
@@ -502,11 +520,22 @@ impl eframe::App for Studio {
                     }
                     ui.add_space(6.);
                     ui.separator();
-                    caption(ui, "SEAM CONTROLS");
+                    caption(
+                        ui,
+                        lang(self.french, "SEAM CONTROLS", "RÉGLAGES DES JONCTIONS"),
+                    );
                     ui.add_enabled_ui(true, |ui| {
                         use material::Method;
                         egui::ComboBox::from_id_salt("seam_method")
-                            .selected_text(self.controls.method.label())
+                            .selected_text(lang(
+                                self.french,
+                                self.controls.method.label(),
+                                match self.controls.method {
+                                    material::Method::Adaptive => "Coupe adaptative",
+                                    material::Method::Straight => "Coupe droite",
+                                    material::Method::Blend => "Fondu doux",
+                                },
+                            ))
                             .width(190.)
                             .show_ui(ui, |ui| {
                                 for method in [Method::Adaptive, Method::Straight, Method::Blend] {
@@ -517,10 +546,34 @@ impl eframe::App for Studio {
                                     );
                                 }
                             });
-                        ui.small(self.controls.method.hint());
+                        ui.small(lang(
+                            self.french,
+                            self.controls.method.hint(),
+                            match self.controls.method {
+                                material::Method::Adaptive => {
+                                    "Suit les détails similaires dans la zone de chevauchement."
+                                }
+                                material::Method::Straight => {
+                                    "Place une coupe droite dans le chevauchement."
+                                }
+                                material::Method::Blend => {
+                                    "Mélange progressivement toute la zone de chevauchement."
+                                }
+                            },
+                        ));
                         for (label, value) in [
-                            ("Horizontal overlap", &mut self.controls.overlap),
-                            ("Vertical overlap", &mut self.controls.overlap_y),
+                            (
+                                lang(
+                                    self.french,
+                                    "Horizontal overlap",
+                                    "Chevauchement horizontal",
+                                ),
+                                &mut self.controls.overlap,
+                            ),
+                            (
+                                lang(self.french, "Vertical overlap", "Chevauchement vertical"),
+                                &mut self.controls.overlap_y,
+                            ),
                         ] {
                             ui.label(label);
                             ui.add(
@@ -535,31 +588,53 @@ impl eframe::App for Studio {
                             );
                         }
                         if self.controls.method != Method::Blend {
-                            ui.label("Feather radius");
+                            ui.label(lang(self.french, "Feather radius", "Rayon de fondu"));
                             ui.add(
                                 egui::Slider::new(&mut self.controls.feather, 0.0..=24.)
                                     .suffix(" px"),
                             );
                         }
                         if self.controls.method == Method::Straight {
-                            ui.label("Cut position in overlap");
+                            ui.label(lang(
+                                self.french,
+                                "Cut position in overlap",
+                                "Position de la coupe",
+                            ));
                             ui.add(
                                 egui::Slider::new(&mut self.controls.position, 0.1..=0.9)
                                     .fixed_decimals(2),
                             );
                         }
                         ui.separator();
-                        caption(ui, "PBR CONTROLS");
+                        caption(ui, lang(self.french, "PBR CONTROLS", "RÉGLAGES PBR"));
                         for (label, val, range) in [
-                            ("Relief strength", &mut self.controls.relief, 0.0..=10.0),
-                            ("Roughness", &mut self.controls.rough, 0.0..=1.0),
-                            ("Metallic", &mut self.controls.metal, 0.0..=1.0),
+                            (
+                                lang(self.french, "Relief strength", "Intensité du relief"),
+                                &mut self.controls.relief,
+                                0.0..=10.0,
+                            ),
+                            (
+                                lang(self.french, "Roughness", "Rugosité"),
+                                &mut self.controls.rough,
+                                0.0..=1.0,
+                            ),
+                            (
+                                lang(self.french, "Metallic", "Métallique"),
+                                &mut self.controls.metal,
+                                0.0..=1.0,
+                            ),
                         ] {
                             ui.label(label);
                             ui.add(egui::Slider::new(val, range).fixed_decimals(2));
                         }
-                        ui.checkbox(&mut self.controls.invert, "Invert height");
-                        ui.checkbox(&mut self.controls.dx, "DirectX normals (−Y)");
+                        ui.checkbox(
+                            &mut self.controls.invert,
+                            lang(self.french, "Invert height", "Inverser la hauteur"),
+                        );
+                        ui.checkbox(
+                            &mut self.controls.dx,
+                            lang(self.french, "DirectX normals (−Y)", "Normales DirectX (−Y)"),
+                        );
                     });
                 });
             });
@@ -571,18 +646,27 @@ impl eframe::App for Studio {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(!self.crop_tab, "Material").clicked() {
+                    if ui
+                        .selectable_label(!self.crop_tab, lang(self.french, "Material", "Matériau"))
+                        .clicked()
+                    {
                         self.crop_tab = false;
                     }
-                    if ui.selectable_label(self.crop_tab, "Recadrage").clicked() {
+                    if ui
+                        .selectable_label(self.crop_tab, lang(self.french, "Crop", "Recadrage"))
+                        .clicked()
+                    {
                         self.crop_tab = true;
                     }
                 });
                 ui.separator();
                 if self.crop_tab {
-                    caption(ui, "RECADRER L’IMAGE SOURCE");
+                    caption(
+                        ui,
+                        lang(self.french, "CROP SOURCE IMAGE", "RECADRER L’IMAGE SOURCE"),
+                    );
                     ui.horizontal(|ui| {
-                        ui.label("Proportions");
+                        ui.label(lang(self.french, "Aspect ratio", "Proportions"));
                         let ratio_changed = egui::ComboBox::from_id_salt("crop_ratio")
                             .selected_text(["Libre", "1:1", "4:3", "16:9", "2:3"][self.crop_ratio])
                             .show_ui(ui, |ui| {
@@ -613,7 +697,10 @@ impl eframe::App for Studio {
                                 egui::vec2(width, height),
                             );
                         }
-                        if ui.button("Réinitialiser").clicked() {
+                        if ui
+                            .button(lang(self.french, "Reset", "Réinitialiser"))
+                            .clicked()
+                        {
                             self.crop_rect = egui::Rect::from_min_max(
                                 egui::pos2(0.08, 0.08),
                                 egui::pos2(0.92, 0.92),
@@ -719,22 +806,37 @@ impl eframe::App for Studio {
                         }
                         self.crop_rect.max = egui::pos2(right, bottom);
                     }
-                    ui.label(format!(
-                        "Sélection : {:.0}% × {:.0}% de l’image",
-                        self.crop_rect.width() * 100.,
-                        self.crop_rect.height() * 100.
-                    ));
+                    let selection = if self.french {
+                        format!(
+                            "Sélection : {:.0}% × {:.0}% de l’image",
+                            self.crop_rect.width() * 100.,
+                            self.crop_rect.height() * 100.
+                        )
+                    } else {
+                        format!(
+                            "Selection: {:.0}% × {:.0}% of image",
+                            self.crop_rect.width() * 100.,
+                            self.crop_rect.height() * 100.
+                        )
+                    };
+                    ui.label(selection);
                     ui.horizontal(|ui| {
-                        ui.label(
+                        ui.label(lang(
+                            self.french,
+                            "Drag the selection to move it. Drag the cyan corner to resize.",
                             "Déplace la zone. Fais glisser le coin cyan pour la redimensionner.",
-                        );
+                        ));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add_enabled(
                                     !busy,
-                                    egui::Button::new("Recadrer et appliquer")
-                                        .fill(ACCENT)
-                                        .stroke(egui::Stroke::NONE),
+                                    egui::Button::new(lang(
+                                        self.french,
+                                        "Crop and apply",
+                                        "Recadrer et appliquer",
+                                    ))
+                                    .fill(ACCENT)
+                                    .stroke(egui::Stroke::NONE),
                                 )
                                 .clicked()
                             {
@@ -744,9 +846,13 @@ impl eframe::App for Studio {
                     });
                 } else {
                     ui.horizontal_wrapped(|ui| {
-                        for (i, name) in ["Single tile", "3 × 3 repeat", "Lit sphere"]
-                            .iter()
-                            .enumerate()
+                        for (i, name) in [
+                            lang(self.french, "Single tile", "Tuile seule"),
+                            "3 × 3 repeat",
+                            lang(self.french, "Lit sphere", "Sphère éclairée"),
+                        ]
+                        .iter()
+                        .enumerate()
                         {
                             if ui.selectable_label(self.view == i, *name).clicked() {
                                 self.view = i;
@@ -756,19 +862,30 @@ impl eframe::App for Studio {
                         ui.separator();
                         ui.monospace(format!("{:.0}%", self.cameras[self.view].scale * 100.));
                         if ui
-                            .small_button("Fit")
-                            .on_hover_text("Reset zoom and pan")
+                            .small_button(lang(self.french, "Fit", "Ajuster"))
+                            .on_hover_text(lang(
+                                self.french,
+                                "Reset zoom and pan",
+                                "Réinitialiser zoom et cadrage",
+                            ))
                             .clicked()
                         {
                             self.cameras[self.view] = Camera::default();
                         }
                     });
                     if self.view == 1 {
-                        ui.checkbox(&mut self.grid, "Show tile boundaries");
+                        ui.checkbox(
+                            &mut self.grid,
+                            lang(
+                                self.french,
+                                "Show tile boundaries",
+                                "Afficher les limites des tuiles",
+                            ),
+                        );
                     }
                     if self.view == 2 {
                         ui.horizontal(|ui| {
-                            ui.small("Light angle");
+                            ui.small(lang(self.french, "Light angle", "Angle de lumière"));
                             if ui
                                 .add(
                                     egui::Slider::new(&mut self.angle, 0.05..=3.09)
@@ -811,7 +928,11 @@ impl eframe::App for Studio {
                         *camera = Camera::default();
                     }
                     camera.constrain(size, rect.size());
-                    response.on_hover_text("Wheel to zoom · drag to pan · double-click to fit");
+                    response.on_hover_text(lang(
+                        self.french,
+                        "Wheel to zoom · drag to pan · double-click to fit",
+                        "Molette pour zoomer · glisser pour déplacer · double-clic pour ajuster",
+                    ));
                     let painter = ui.painter_at(rect);
                     let target = egui::Rect::from_center_size(
                         rect.center() + camera.offset,
@@ -839,7 +960,7 @@ impl eframe::App for Studio {
                     }
                     ui.add_space(6.);
                     ui.separator();
-                    caption(ui, "TEXTURE MAPS");
+                    caption(ui, lang(self.french, "TEXTURE MAPS", "CARTES DE TEXTURE"));
                     if self.chips.is_empty() {
                         self.chips = self
                             .surface

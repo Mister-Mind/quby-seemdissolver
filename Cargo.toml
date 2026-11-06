@@ -1,6 +1,6 @@
 [package]
 name = "quby-seemdissolver"
-version = "1.2.2"
+version = "1.2.3"
 license = "MIT"
 description = "Offline seamless texture and PBR material editor"
 edition = "2021"
@@ -12,4 +12,5 @@ rfd = "0.15"
 
 [profile.dev]
 debug = 0
+
 

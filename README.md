@@ -38,3 +38,8 @@ Material settings update the texture and PBR previews automatically after a shor
 
 Ouvre l’onglet **Recadrage** pour déplacer ou redimensionner la zone de sélection. Choisis une proportion libre, carrée, 4:3, 16:9 ou 2:3. Clique **Recadrer et appliquer** pour recalculer automatiquement les textures et cartes PBR.
 
+
+
+## Interface language
+
+Use the compact EN/FR button in the header to switch languages. English is selected at launch.
