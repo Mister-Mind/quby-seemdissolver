@@ -1,6 +1,6 @@
 [package]
 name = "quby-seemdissolver"
-version = "1.3.2"
+version = "1.3.3"
 license = "MIT"
 description = "Seamless texture editor and PBR material asset browser"
 edition = "2021"
@@ -11,6 +11,7 @@ image = { version = "0.25", default-features = false, features = ["png","jpeg","
 rfd = "0.15"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 serde_json = "1"
+tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.dev]

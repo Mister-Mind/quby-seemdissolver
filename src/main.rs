@@ -13,6 +13,7 @@ use std::{
 
 const ACCENT: Color32 = Color32::from_rgb(157, 210, 210);
 const MUTED: Color32 = Color32::from_rgb(166, 171, 186);
+const ERROR: Color32 = Color32::from_rgb(255, 108, 112);
 fn lang(french: bool, english: &'static str, français: &'static str) -> &'static str {
     if french {
         français
@@ -70,6 +71,7 @@ struct Studio {
     thumb: Option<TextureHandle>,
     worker: Option<mpsc::Receiver<Result<Job, String>>>,
     status: String,
+    status_error: bool,
     observed_controls: Settings,
     regen_at: Option<std::time::Instant>,
     crop_tab: bool,
@@ -156,21 +158,129 @@ fn export(folder: &Path, name: &str, maps: &[RgbImage], s: &Settings) -> Result<
     }
     Ok(dest)
 }
-fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathBuf, String> {
-    let library = std::env::var("USERPROFILE")
+fn blender_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("BLENDER_PATH").map(PathBuf::from) {
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "Blender executable not found at {}",
+                path.display()
+            ))
+        };
+    }
+    let installed = std::env::var_os("ProgramFiles")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join("Blender Foundation");
+    let standard = ["Blender 5.2", "Blender 5.1"]
+        .into_iter()
+        .map(|version| installed.join(version).join("blender.exe"));
+    let path = std::env::var_os("PATH");
+    let on_path = path
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("blender.exe"));
+    standard.chain(on_path).find(|path| path.is_file()).ok_or_else(|| {
+        "Blender executable not found. Install Blender 5.1 or newer, or set BLENDER_PATH to the full path to blender.exe.".into()
+    })
+}
+
+fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathBuf, String> {
+    let blender = blender_executable()?;
+    let library = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join("Documents")
         .join("Blender Asset Libraries")
         .join("Quby Materials");
-    std::fs::create_dir_all(&library).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&library)
+        .map_err(|e| format!("Could not create {}: {e}", library.display()))?;
     let catalog = "bfb8ef08-9dd7-4f5a-bdb6-c3984b32ccfa";
     let catalog_file = library.join("blender_assets.cats.txt");
-    if !catalog_file.exists() {
-        std::fs::write(&catalog_file,format!("# This is an Asset Catalog Definition file for Blender.\nVERSION 1\n{catalog}:Quby Materials:Quby Materials\n")).map_err(|e|e.to_string())?;
+    match std::fs::File::create_new(&catalog_file) {
+        Ok(mut file) => {
+            use std::io::Write;
+            writeln!(file, "VERSION 1\n{catalog}:Quby Materials:Quby Materials")
+                .map_err(|e| format!("Could not write the Blender catalog: {e}"))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("Could not create the Blender catalog: {e}")),
     }
+
+    let work = tempfile::tempdir()
+        .map_err(|e| format!("Could not create temporary Blender export files: {e}"))?;
+    let script = work.path().join("make_asset.py");
+    std::fs::write(&script, include_str!("blender_asset.py"))
+        .map_err(|e| format!("Could not write the Blender export script: {e}"))?;
+    let staged = tempfile::Builder::new()
+        .prefix(".quby-")
+        .suffix(".blend")
+        .tempfile_in(&library)
+        .map_err(|e| format!("Could not prepare the asset in {}: {e}", library.display()))?
+        .into_temp_path();
+    let staged_path: &Path = staged.as_ref();
+
+    let mut cmd = std::process::Command::new(&blender);
+    cmd.args([
+        "--background",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "1",
+        "--python",
+    ])
+    .arg(&script)
+    .arg("--")
+    .arg(staged_path)
+    .arg(name)
+    .arg(mapping.to_string())
+    .arg(&library)
+    .arg(catalog);
+    for index in [0, 2, 5, 3] {
+        let path = work.path().join(format!("{}.png", FILES[index]));
+        maps[index].save(&path).map_err(|e| {
+            format!(
+                "Could not prepare the {} map for Blender: {e}",
+                FILES[index]
+            )
+        })?;
+        cmd.arg(path);
+    }
+
+    let result = cmd
+        .output()
+        .map_err(|e| format!("Could not start Blender at {}: {e}", blender.display()))?;
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.as_ref()
+        } else {
+            stderr.as_ref()
+        };
+        let tail = detail
+            .lines()
+            .rev()
+            .find(|line| {
+                let line = line.trim();
+                !line.is_empty() && !line.starts_with("Error: script failed")
+            })
+            .unwrap_or("Blender did not report a reason");
+        return Err(format!(
+            "Blender export failed ({}): {}",
+            result.status,
+            tail.trim()
+        ));
+    }
+    if !std::fs::metadata(staged_path).is_ok_and(|info| info.len() > 0) {
+        return Err("Blender finished without writing a material asset.".into());
+    }
+
     let clean: String = name
         .chars()
+        .take(70)
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -178,88 +288,31 @@ fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathB
                 '_'
             }
         })
-        .take(70)
         .collect();
-    let mut output = library.join(format!("{clean}.blend"));
-    let mut suffix = 2;
-    while output.exists() {
-        output = library.join(format!("{clean}_{suffix}.blend"));
-        suffix += 1;
+    let mut staged = staged;
+    for index in 1.. {
+        let filename = if index == 1 {
+            format!("{clean}.blend")
+        } else {
+            format!("{clean}_{index}.blend")
+        };
+        let output = library.join(filename);
+        match staged.persist_noclobber(&output) {
+            Ok(()) => return Ok(output),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                staged = error.path
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not install {}: {}",
+                    output.display(),
+                    error.error
+                ))
+            }
+        }
     }
-    let root = std::env::temp_dir().join(format!("quby-blender-{}", std::process::id()));
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    for (img, label) in maps.iter().zip([
-        "BaseColor",
-        "Normal",
-        "Roughness",
-        "Height",
-        "AO",
-        "Metallic",
-    ]) {
-        let p = root.join(format!("{label}.png"));
-        img.save(&p).map_err(|e| e.to_string())?;
-        files.push(p);
-    }
-    let script = root.join("make_asset.py");
-    std::fs::write(&script, BLENDER_ASSET_SCRIPT).map_err(|e| e.to_string())?;
-    let blender = [
-        r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-    .ok_or("Blender 5.1 or newer was not found")?;
-    let mut cmd = std::process::Command::new(blender);
-    cmd.args(["--background", "--python"])
-        .arg(&script)
-        .arg("--")
-        .arg(&output)
-        .arg(name)
-        .arg(mapping.to_string())
-        .arg(&library)
-        .arg(catalog);
-    for f in files {
-        cmd.arg(f);
-    }
-    let result = cmd.output().map_err(|e| e.to_string())?;
-    if !result.status.success() {
-        return Err(String::from_utf8_lossy(&result.stderr)
-            .chars()
-            .rev()
-            .take(900)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect());
-    }
-    Ok(output)
+    unreachable!()
 }
-const BLENDER_ASSET_SCRIPT: &str = r#"
-import bpy,sys
-from pathlib import Path
-a=sys.argv[sys.argv.index('--')+1:]; out,name,mode,library,catalog,*paths=a
-bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
-m=bpy.data.materials.new(name);m.diffuse_color=(.32,.34,.36,1);m.use_nodes=True
-n=m.node_tree.nodes;l=m.node_tree.links;n.clear();outn=n.new('ShaderNodeOutputMaterial');bs=n.new('ShaderNodeBsdfPrincipled');l.new(bs.outputs['BSDF'],outn.inputs['Surface'])
-coords=n.new('ShaderNodeTexCoord');mapping=n.new('ShaderNodeVectorMath');mapping.operation='SCALE';mapping.inputs[3].default_value=1.0
-if mode=='0': vector=coords.outputs['UV']
-else: vector=coords.outputs['Generated']
-for i,(p,color) in enumerate(zip(paths,[True,False,False,False,False,False])):
- tex=n.new('ShaderNodeTexImage');tex.image=bpy.data.images.load(p,check_existing=True);tex.image.pack();tex.interpolation='Smart';tex.projection='BOX' if mode in ('1','2') else 'FLAT';tex.projection_blend=.25 if mode=='2' else 0.;tex.image.colorspace_settings.name='sRGB' if color else 'Non-Color';l.new(vector,tex.inputs['Vector'])
- if i==0:l.new(tex.outputs['Color'],bs.inputs['Base Color'])
- elif i==1:
-  normal=n.new('ShaderNodeNormalMap');l.new(tex.outputs['Color'],normal.inputs['Color']);l.new(normal.outputs['Normal'],bs.inputs['Normal'])
- elif i==2:l.new(tex.outputs['Color'],bs.inputs['Roughness'])
- elif i==3:
-  bump=n.new('ShaderNodeBump');l.new(tex.outputs['Color'],bump.inputs['Height']);l.new(bump.outputs['Normal'],bs.inputs['Normal'])
- elif i==5:l.new(tex.outputs['Color'],bs.inputs['Metallic'])
-m.asset_mark();m.asset_data.description='Quby seemdissolver PBR material';m.asset_data.catalog_id=catalog
-root=Path(library).resolve();prefs=bpy.context.preferences.filepaths.asset_libraries
-if not any(Path(item.path).resolve()==root for item in prefs): prefs.new(name='Quby Materials',directory=str(root))
-bpy.ops.wm.save_userpref();bpy.ops.wm.save_as_mainfile(filepath=str(Path(out)))
-"#;
 fn texture(ctx: &egui::Context, id: &str, img: &RgbImage) -> TextureHandle {
     ctx.load_texture(
         id,
@@ -327,6 +380,7 @@ impl Studio {
                 "Matériau de démonstration chargé",
             )
             .into(),
+            status_error: false,
             observed_controls: settings.clone(),
             regen_at: None,
             crop_tab: false,
@@ -356,6 +410,7 @@ impl Studio {
         let (tx, rx) = mpsc::channel();
         self.worker = Some(rx);
         self.status = msg.into();
+        self.status_error = false;
         let ctx = ctx.clone();
         thread::spawn(move || {
             let _ = tx.send(f());
@@ -507,7 +562,10 @@ impl eframe::App for Studio {
                         self.view = 1;
                         self.generate(ctx, Some(path));
                     }
-                    Err(e) => self.status = e,
+                    Err(e) => {
+                        self.status = e;
+                        self.status_error = true;
+                    }
                 }
             }
         }
@@ -708,18 +766,21 @@ impl eframe::App for Studio {
                 if busy {
                     ui.spinner();
                 }
-                ui.label(
-                    RichText::new(if dirty && !busy {
-                        lang(
-                            self.french,
-                            "Updating material...",
-                            "Mise à jour du matériau…",
-                        )
-                    } else {
-                        &self.status
-                    })
-                    .size(12.),
-                );
+                let status = RichText::new(if dirty && !busy && !self.status_error {
+                    lang(
+                        self.french,
+                        "Updating material...",
+                        "Mise à jour du matériau…",
+                    )
+                } else {
+                    &self.status
+                })
+                .size(12.);
+                ui.label(if self.status_error {
+                    status.color(ERROR)
+                } else {
+                    status
+                });
             });
         });
         egui::SidePanel::left("source")
