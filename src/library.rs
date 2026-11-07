@@ -19,6 +19,7 @@ pub struct Asset {
 fn trusted_url(url: &str) -> bool {
     [
         "https://api.polyhaven.com/",
+        "https://cdn.polyhaven.com/",
         "https://dl.polyhaven.org/",
         "https://ambientcg.com/",
         "https://www.ambientcg.com/",
@@ -30,7 +31,7 @@ fn trusted_url(url: &str) -> bool {
 pub fn search(provider: Provider, query: &str) -> Result<Vec<Asset>, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(35))
-        .user_agent("quby-seemdissolver/1.3 (https://github.com/wasnas/quby-seemdissolver)")
+        .user_agent("quby-seemdissolver/1.3.1 (https://github.com/wasnas/quby-seemdissolver)")
         .build()
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -142,16 +143,17 @@ pub fn search(provider: Provider, query: &str) -> Result<Vec<Asset>, String> {
     }
     Ok(out)
 }
-pub fn download(asset: &Asset, folder: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub fn download(
+    asset: &Asset,
+    folder: &std::path::Path,
+    resolution: &str,
+) -> Result<std::path::PathBuf, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(240))
-        .user_agent("quby-seemdissolver/1.3 (https://github.com/wasnas/quby-seemdissolver)")
+        .user_agent("quby-seemdissolver/1.3.1 (https://github.com/wasnas/quby-seemdissolver)")
         .build()
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-    if !trusted_url(&asset.download) {
-        return Err("Catalogue returned an untrusted download URL".into());
-    }
     let safe_id: String = asset
         .id
         .chars()
@@ -164,12 +166,23 @@ pub fn download(asset: &Asset, folder: &std::path::Path) -> Result<std::path::Pa
         })
         .take(80)
         .collect();
+    let download_url = match asset.provider {
+        Provider::AmbientCg => format!(
+            "https://ambientcg.com/get?file={}_{}-PNG.zip",
+            safe_id,
+            resolution.to_ascii_uppercase()
+        ),
+        Provider::PolyHaven => asset.download.clone(),
+    };
+    if !trusted_url(&download_url) {
+        return Err("Catalogue returned an untrusted download URL".into());
+    }
     let path = folder.join(safe_id);
     std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     match asset.provider {
         Provider::AmbientCg => {
             let bytes = client
-                .get(&asset.download)
+                .get(&download_url)
                 .send()
                 .map_err(|e| e.to_string())?
                 .error_for_status()
@@ -220,7 +233,7 @@ pub fn download(asset: &Asset, folder: &std::path::Path) -> Result<std::path::Pa
         }
         Provider::PolyHaven => {
             let data: Value = client
-                .get(&asset.download)
+                .get(&download_url)
                 .send()
                 .map_err(|e| e.to_string())?
                 .error_for_status()
@@ -237,8 +250,8 @@ pub fn download(asset: &Asset, folder: &std::path::Path) -> Result<std::path::Pa
             ] {
                 let Some(file) = data
                     .get(map)
-                    .and_then(|v| v.get("2k").or_else(|| v.get("1k")))
-                    .and_then(|v| v.get("jpg").or_else(|| v.get("png")))
+                    .and_then(|v| v.get(resolution))
+                    .and_then(|v| v.get("png").or_else(|| v.get("jpg")))
                 else {
                     continue;
                 };
@@ -268,7 +281,7 @@ pub fn download(asset: &Asset, folder: &std::path::Path) -> Result<std::path::Pa
                     color = Some(path.join(name));
                 }
             }
-            color.ok_or_else(|| "Poly Haven asset has no color image at 1K/2K".into())
+            color.ok_or_else(|| format!("Poly Haven asset has no color image at {resolution}"))
         }
     }
 }

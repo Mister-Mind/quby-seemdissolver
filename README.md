@@ -46,10 +46,10 @@ Use the compact EN/FR button in the header to switch languages. English is selec
 
 ## Texture library
 
-Browse and download materials from Poly Haven and ambientCG. Search results include preview images. Downloads go to `Downloads/quby-seemdissolver/Textures`. Select **Download & tile** to open the downloaded color map in Material and build a tile preview. The catalogs need an internet connection. Poly Haven is credited in the app as required by its API terms. ambientCG materials are CC0.
+Browse and download materials from Poly Haven and ambientCG. Search results use a responsive card grid with preview images; press Enter in the search field to search. Choose 1K, 2K, 4K or 8K before downloading. Downloads go to `Downloads/quby-seemdissolver/Textures`. Select **Download & tile** to open the downloaded color map in Material and build a tile preview. The catalogs need an internet connection. Poly Haven is credited in the app as required by its API terms. ambientCG materials are CC0.
 
 ## Blender material assets
 
-Choose **Export as Blender asset** to save a `.blend` material asset. Select UV, cube projection, or triplanar projection. Blender 5.1 or newer must be installed. Image maps are packed into the blend file.
+Choose **Export as Blender asset**, select UV, cube projection, or triplanar projection, then choose **Add to Quby Materials**. Quby writes the `.blend` material into `Documents/Blender Asset Libraries/Quby Materials`, creates the **Quby Materials** catalog, and registers the library in Blender's Asset Browser preferences. Blender 5.1 or newer must be installed. Image maps are packed into the blend file.
 
 Middle-drag the lit sphere to orbit its material preview.

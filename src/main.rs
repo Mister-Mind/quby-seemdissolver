@@ -81,10 +81,12 @@ struct Studio {
     provider: library::Provider,
     search_text: String,
     assets: Vec<library::Asset>,
+    library_thumbs: std::collections::HashMap<String, TextureHandle>,
     selected_asset: Option<usize>,
     orbit: Vec2,
     mapping: usize,
     show_blender_export: bool,
+    resolution: String,
 }
 fn load_source(path: &Path) -> Result<RgbImage, String> {
     let reader = ImageReader::open(path)
@@ -153,12 +155,36 @@ fn export(folder: &Path, name: &str, maps: &[RgbImage], s: &Settings) -> Result<
     }
     Ok(dest)
 }
-fn export_blender(
-    path: &Path,
-    name: &str,
-    maps: &[RgbImage],
-    mapping: usize,
-) -> Result<PathBuf, String> {
+fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathBuf, String> {
+    let library = std::env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("Documents")
+        .join("Blender Asset Libraries")
+        .join("Quby Materials");
+    std::fs::create_dir_all(&library).map_err(|e| e.to_string())?;
+    let catalog = "bfb8ef08-9dd7-4f5a-bdb6-c3984b32ccfa";
+    let catalog_file = library.join("blender_assets.cats.txt");
+    if !catalog_file.exists() {
+        std::fs::write(&catalog_file,format!("# This is an Asset Catalog Definition file for Blender.\nVERSION 1\n{catalog}:Quby Materials:Quby Materials\n")).map_err(|e|e.to_string())?;
+    }
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(70)
+        .collect();
+    let mut output = library.join(format!("{clean}.blend"));
+    let mut suffix = 2;
+    while output.exists() {
+        output = library.join(format!("{clean}_{suffix}.blend"));
+        suffix += 1;
+    }
     let root = std::env::temp_dir().join(format!("quby-blender-{}", std::process::id()));
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let mut files = Vec::new();
@@ -185,32 +211,34 @@ fn export_blender(
     .find(|p| p.exists())
     .ok_or("Blender 5.1 or newer was not found")?;
     let mut cmd = std::process::Command::new(blender);
-    cmd.args(["--background", "--factory-startup", "--python"])
+    cmd.args(["--background", "--python"])
         .arg(&script)
         .arg("--")
-        .arg(path)
+        .arg(&output)
         .arg(name)
-        .arg(mapping.to_string());
+        .arg(mapping.to_string())
+        .arg(&library)
+        .arg(catalog);
     for f in files {
         cmd.arg(f);
     }
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr)
+    let result = cmd.output().map_err(|e| e.to_string())?;
+    if !result.status.success() {
+        return Err(String::from_utf8_lossy(&result.stderr)
             .chars()
             .rev()
-            .take(700)
+            .take(900)
             .collect::<String>()
             .chars()
             .rev()
             .collect());
     }
-    Ok(path.to_path_buf())
+    Ok(output)
 }
 const BLENDER_ASSET_SCRIPT: &str = r#"
 import bpy,sys
 from pathlib import Path
-a=sys.argv[sys.argv.index('--')+1:]; out,name,mode,*paths=a
+a=sys.argv[sys.argv.index('--')+1:]; out,name,mode,library,catalog,*paths=a
 bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
 m=bpy.data.materials.new(name);m.diffuse_color=(.32,.34,.36,1);m.use_nodes=True
 n=m.node_tree.nodes;l=m.node_tree.links;n.clear();outn=n.new('ShaderNodeOutputMaterial');bs=n.new('ShaderNodeBsdfPrincipled');l.new(bs.outputs['BSDF'],outn.inputs['Surface'])
@@ -226,7 +254,10 @@ for i,(p,color) in enumerate(zip(paths,[True,False,False,False,False,False])):
  elif i==3:
   bump=n.new('ShaderNodeBump');l.new(tex.outputs['Color'],bump.inputs['Height']);l.new(bump.outputs['Normal'],bs.inputs['Normal'])
  elif i==5:l.new(tex.outputs['Color'],bs.inputs['Metallic'])
-m.asset_mark();m.asset_data.description='Quby seemdissolver PBR material';bpy.ops.wm.save_as_mainfile(filepath=str(Path(out)))
+m.asset_mark();m.asset_data.description='Quby seemdissolver PBR material';m.asset_data.catalog_id=catalog
+root=Path(library).resolve();prefs=bpy.context.preferences.filepaths.asset_libraries
+if not any(Path(item.path).resolve()==root for item in prefs): prefs.new(name='Quby Materials',directory=str(root))
+bpy.ops.wm.save_userpref();bpy.ops.wm.save_as_mainfile(filepath=str(Path(out)))
 "#;
 fn texture(ctx: &egui::Context, id: &str, img: &RgbImage) -> TextureHandle {
     ctx.load_texture(
@@ -306,10 +337,12 @@ impl Studio {
             provider: library::Provider::PolyHaven,
             search_text: String::new(),
             assets: Vec::new(),
+            library_thumbs: std::collections::HashMap::new(),
             selected_asset: None,
             orbit: Vec2::ZERO,
             mapping: 0,
             show_blender_export: false,
+            resolution: "2k".into(),
         }
     }
     fn run(
@@ -449,6 +482,7 @@ impl eframe::App for Studio {
                     Ok(Job::Saved(p)) => self.status = format!("Exported to {}", p.display()),
                     Ok(Job::Assets(assets)) => {
                         self.assets = assets;
+                        self.library_thumbs.clear();
                         self.selected_asset = (!self.assets.is_empty()).then_some(0);
                         self.status = format!("{} textures found", self.assets.len());
                     }
@@ -612,26 +646,20 @@ impl eframe::App for Studio {
                             !busy,
                             egui::Button::new(lang(
                                 self.french,
-                                "Save .blend",
-                                "Enregistrer .blend",
+                                "Add to Quby Materials",
+                                "Ajouter à Quby Materials",
                             ))
                             .fill(ACCENT),
                         )
                         .clicked()
                     {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Blender file", &["blend"])
-                            .set_file_name("QubyMaterial.blend")
-                            .save_file()
-                        {
-                            let maps = self.surface.maps.clone();
-                            let name = self.surface.name.clone();
-                            let mapping = self.mapping;
-                            self.show_blender_export = false;
-                            self.run(ctx, "Creating Blender material asset…", move || {
-                                export_blender(&path, &name, &maps, mapping).map(Job::Saved)
-                            });
-                        }
+                        let maps = self.surface.maps.clone();
+                        let name = self.surface.name.clone();
+                        let mapping = self.mapping;
+                        self.show_blender_export = false;
+                        self.run(ctx, "Adding Blender material asset…", move || {
+                            export_blender(&name, &maps, mapping).map(Job::Saved)
+                        });
                     }
                 });
             });
@@ -844,25 +872,59 @@ impl eframe::App for Studio {
                 });
                 ui.separator();
                 if self.library_tab {
-                    ui.horizontal(|ui|{
-                        ui.heading(lang(self.french,"Texture library","Bibliothèque de textures"));
-                        egui::ComboBox::from_id_salt("library-provider").selected_text(match self.provider{library::Provider::PolyHaven=>"Poly Haven",library::Provider::AmbientCg=>"ambientCG"}).show_ui(ui,|ui|{
-                            ui.selectable_value(&mut self.provider,library::Provider::PolyHaven,"Poly Haven");
-                            ui.selectable_value(&mut self.provider,library::Provider::AmbientCg,"ambientCG");
-                        });
-                        ui.add(egui::TextEdit::singleline(&mut self.search_text).hint_text(lang(self.french,"Search materials","Rechercher des textures")).desired_width(190.));
-                        if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Search","Rechercher"))).clicked(){let provider=self.provider;let query=self.search_text.clone();self.run(ctx,"Searching texture libraries…",move||library::search(provider,&query).map(Job::Assets));}
-                    });
-                    ui.label(RichText::new(lang(self.french,"Powered by Poly Haven · ambientCG materials are CC0","Données Poly Haven · matériaux ambientCG sous licence CC0")).small().color(MUTED));
-                    let assets=self.assets.clone();
-                    egui::ScrollArea::vertical().show(ui,|ui|{
-                        for (index,asset) in assets.iter().enumerate(){ui.group(|ui|{ui.horizontal(|ui|{
-                            if let Some(bytes)=&asset.preview{if let Ok(img)=image::load_from_memory(bytes){let img=img.thumbnail(128,96).to_rgb8();let tex=texture(ctx,&format!("asset-preview-{}",asset.id),&img);ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::new(100.,75.)));}}
-                            ui.vertical(|ui|{ui.strong(&asset.name);ui.small(&asset.id);if ui.selectable_label(self.selected_asset==Some(index),lang(self.french,"Preview","Aperçu")).clicked(){self.selected_asset=Some(index);}
-                                if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Download & tile","Télécharger et carreler"))).clicked(){let asset=asset.clone();let folder=std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_|std::env::temp_dir()).join("Downloads").join("quby-seemdissolver").join("Textures");self.run(ctx,"Downloading texture maps…",move||library::download(&asset,&folder).map(Job::Downloaded));}
+                    ui.horizontal(|ui| {
+                        ui.heading(lang(self.french, "Texture library", "Bibliothèque de textures"));
+                        egui::ComboBox::from_id_salt("library-provider")
+                            .selected_text(match self.provider { library::Provider::PolyHaven => "Poly Haven", library::Provider::AmbientCg => "ambientCG" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.provider, library::Provider::PolyHaven, "Poly Haven");
+                                ui.selectable_value(&mut self.provider, library::Provider::AmbientCg, "ambientCG");
                             });
-                        });});}
+                        let search = ui.add(egui::TextEdit::singleline(&mut self.search_text)
+                            .hint_text(lang(self.french, "Search materials", "Rechercher des textures"))
+                            .desired_width(190.));
+                        let enter = search.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let button = ui.add_enabled(!busy, egui::Button::new(lang(self.french, "Search", "Rechercher"))).clicked();
+                        if !busy && (enter || button) {
+                            let provider=self.provider; let query=self.search_text.clone();
+                            self.run(ctx, "Searching texture libraries…", move || library::search(provider,&query).map(Job::Assets));
+                        }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label(lang(self.french,"Resolution","Résolution"));
+                        egui::ComboBox::from_id_salt("texture-resolution").selected_text(self.resolution.to_uppercase()).show_ui(ui,|ui|{
+                            for resolution in ["1k","2k","4k","8k"] { ui.selectable_value(&mut self.resolution,resolution.to_string(),resolution.to_uppercase()); }
+                        });
+                        ui.label(RichText::new(lang(self.french,"Powered by Poly Haven · ambientCG materials are CC0","Données Poly Haven · matériaux ambientCG sous licence CC0")).small().color(MUTED));
+                    });
+                    let columns=if ui.available_width()>760.{3}else if ui.available_width()>490.{2}else{1};
+                    for asset in &self.assets {
+                        if !self.library_thumbs.contains_key(&asset.id) {
+                            if let Some(bytes)=&asset.preview { if let Ok(img)=image::load_from_memory(bytes){
+                                let img=img.thumbnail(320,200).to_rgb8();let handle=texture(ctx,&format!("asset-preview-{}",asset.id),&img);self.library_thumbs.insert(asset.id.clone(),handle);
+                            }}
+                        }
+                    }
+                    let assets=self.assets.clone();let mut download_choice=None;
+                    ui.columns(columns,|panels|{
+                        for (index,asset) in assets.iter().enumerate(){
+                            panels[index%columns].group(|ui|{
+                                if let Some(image)=self.library_thumbs.get(&asset.id){
+                                    if ui.add(egui::Image::new(image).fit_to_exact_size(Vec2::new(ui.available_width(),128.))).clicked(){self.selected_asset=Some(index);}
+                                }
+                                ui.strong(&asset.name);
+                                ui.small(format!("{} · {}",match asset.provider{library::Provider::PolyHaven=>"Poly Haven",library::Provider::AmbientCg=>"ambientCG"},asset.id));
+                                let selected=self.selected_asset==Some(index);
+                                if selected { ui.label(RichText::new(lang(self.french,"Selected","Sélectionnée")).small().color(ACCENT)); }
+                                if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Download & tile","Télécharger et carreler"))).clicked(){download_choice=Some(asset.clone());}
+                            });
+                        }
+                    });
+                    if let Some(asset)=download_choice {
+                        let resolution=self.resolution.clone();
+                        let folder=std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_|std::env::temp_dir()).join("Downloads").join("quby-seemdissolver").join("Textures");
+                        self.run(ctx,lang(self.french,"Downloading texture maps…","Téléchargement des textures…"),move||library::download(&asset,&folder,&resolution).map(Job::Downloaded));
+                    }
                 } else if self.crop_tab {
                     caption(
                         ui,
