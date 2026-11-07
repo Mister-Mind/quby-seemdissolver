@@ -82,6 +82,7 @@ struct Studio {
     search_text: String,
     assets: Vec<library::Asset>,
     library_thumbs: std::collections::HashMap<String, TextureHandle>,
+    library_previews: Option<mpsc::Receiver<(String, Option<image::RgbaImage>)>>,
     selected_asset: Option<usize>,
     orbit: Vec2,
     mapping: usize,
@@ -338,6 +339,7 @@ impl Studio {
             search_text: String::new(),
             assets: Vec::new(),
             library_thumbs: std::collections::HashMap::new(),
+            library_previews: None,
             selected_asset: None,
             orbit: Vec2::ZERO,
             mapping: 0,
@@ -456,6 +458,7 @@ impl Studio {
 }
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let mut reset_library_scroll = false;
         if let Some(rx) = &self.worker {
             let result = match rx.try_recv() {
                 Ok(r) => Some(r),
@@ -483,6 +486,18 @@ impl eframe::App for Studio {
                     Ok(Job::Assets(assets)) => {
                         self.assets = assets;
                         self.library_thumbs.clear();
+                        let (tx, rx) = mpsc::channel();
+                        self.library_previews = Some(rx);
+                        let assets = self.assets.clone();
+                        let ctx = ctx.clone();
+                        thread::spawn(move || {
+                            library::load_previews(&assets, |id, image| {
+                                let received = tx.send((id, image)).is_ok();
+                                ctx.request_repaint();
+                                received
+                            });
+                        });
+                        reset_library_scroll = true;
                         self.selected_asset = (!self.assets.is_empty()).then_some(0);
                         self.status = format!("{} textures found", self.assets.len());
                     }
@@ -493,6 +508,30 @@ impl eframe::App for Studio {
                         self.generate(ctx, Some(path));
                     }
                     Err(e) => self.status = e,
+                }
+            }
+        }
+        if let Some(previews) = &self.library_previews {
+            loop {
+                match previews.try_recv() {
+                    Ok((id, Some(image))) => {
+                        let color = egui::ColorImage::from_rgba_unmultiplied(
+                            [image.width() as usize, image.height() as usize],
+                            image.as_raw(),
+                        );
+                        let handle = ctx.load_texture(
+                            format!("asset-preview-{id}"),
+                            color,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.library_thumbs.insert(id, handle);
+                    }
+                    Ok((_, None)) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.library_previews = None;
+                        break;
+                    }
                 }
             }
         }
@@ -883,7 +922,7 @@ impl eframe::App for Studio {
                         let search = ui.add(egui::TextEdit::singleline(&mut self.search_text)
                             .hint_text(lang(self.french, "Search materials", "Rechercher des textures"))
                             .desired_width(190.));
-                        let enter = search.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let enter = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let button = ui.add_enabled(!busy, egui::Button::new(lang(self.french, "Search", "Rechercher"))).clicked();
                         if !busy && (enter || button) {
                             let provider=self.provider; let query=self.search_text.clone();
@@ -897,26 +936,49 @@ impl eframe::App for Studio {
                         });
                         ui.label(RichText::new(lang(self.french,"Powered by Poly Haven · ambientCG materials are CC0","Données Poly Haven · matériaux ambientCG sous licence CC0")).small().color(MUTED));
                     });
-                    let columns=if ui.available_width()>760.{3}else if ui.available_width()>490.{2}else{1};
-                    for asset in &self.assets {
-                        if !self.library_thumbs.contains_key(&asset.id) {
-                            if let Some(bytes)=&asset.preview { if let Ok(img)=image::load_from_memory(bytes){
-                                let img=img.thumbnail(320,200).to_rgb8();let handle=texture(ctx,&format!("asset-preview-{}",asset.id),&img);self.library_thumbs.insert(asset.id.clone(),handle);
-                            }}
-                        }
+                    let mut download_choice = None;
+                    let mut results = egui::ScrollArea::vertical()
+                        .id_salt("library-results")
+                        .auto_shrink([false, false]);
+                    if reset_library_scroll {
+                        results = results.vertical_scroll_offset(0.0);
                     }
-                    let assets=self.assets.clone();let mut download_choice=None;
-                    ui.columns(columns,|panels|{
-                        for (index,asset) in assets.iter().enumerate(){
-                            panels[index%columns].group(|ui|{
-                                if let Some(image)=self.library_thumbs.get(&asset.id){
-                                    if ui.add(egui::Image::new(image).fit_to_exact_size(Vec2::new(ui.available_width(),128.))).clicked(){self.selected_asset=Some(index);}
+                    results.show(ui, |ui| {
+                        let columns = if ui.available_width() > 760. { 3 }
+                            else if ui.available_width() > 490. { 2 }
+                            else { 1 };
+                        for (row, assets) in self.assets.chunks(columns).enumerate() {
+                            ui.columns(columns, |panels| {
+                                for (column, asset) in assets.iter().enumerate() {
+                                    let index = row * columns + column;
+                                    panels[column].group(|ui| {
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            Vec2::new(ui.available_width(), 144.),
+                                            egui::Sense::click(),
+                                        );
+                                        if let Some(image) = self.library_thumbs.get(&asset.id) {
+                                            let size = image.size_vec2();
+                                            let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                                            ui.painter().image(
+                                                image.id(),
+                                                egui::Rect::from_center_size(rect.center(), size * scale),
+                                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                                                Color32::WHITE,
+                                            );
+                                            if response.clicked() {
+                                                self.selected_asset = Some(index);
+                                            }
+                                        }
+                                        let selected = self.selected_asset == Some(index);
+                                        let title = RichText::new(&asset.name).strong();
+                                        ui.add(egui::Label::new(if selected { title.color(ACCENT) } else { title }).truncate())
+                                            .on_hover_text(&asset.name);
+                                        ui.add(egui::Label::new(RichText::new(&asset.id).small()).truncate());
+                                        if ui.add_enabled(!busy, egui::Button::new(lang(self.french, "Download & tile", "Télécharger et carreler"))).clicked() {
+                                            download_choice = Some(asset.clone());
+                                        }
+                                    });
                                 }
-                                ui.strong(&asset.name);
-                                ui.small(format!("{} · {}",match asset.provider{library::Provider::PolyHaven=>"Poly Haven",library::Provider::AmbientCg=>"ambientCG"},asset.id));
-                                let selected=self.selected_asset==Some(index);
-                                if selected { ui.label(RichText::new(lang(self.french,"Selected","Sélectionnée")).small().color(ACCENT)); }
-                                if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Download & tile","Télécharger et carreler"))).clicked(){download_choice=Some(asset.clone());}
                             });
                         }
                     });

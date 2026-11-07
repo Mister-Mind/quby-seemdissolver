@@ -14,7 +14,6 @@ pub struct Asset {
     pub name: String,
     pub image: String,
     pub download: String,
-    pub preview: Option<Vec<u8>>,
 }
 fn trusted_url(url: &str) -> bool {
     [
@@ -31,7 +30,7 @@ fn trusted_url(url: &str) -> bool {
 pub fn search(provider: Provider, query: &str) -> Result<Vec<Asset>, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(35))
-        .user_agent("quby-seemdissolver/1.3.1 (https://github.com/wasnas/quby-seemdissolver)")
+        .user_agent(USER_AGENT)
         .build()
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -75,7 +74,6 @@ pub fn search(provider: Provider, query: &str) -> Result<Vec<Asset>, String> {
                     name: name.into(),
                     image: thumb.into(),
                     download: format!("https://api.polyhaven.com/files/{id}"),
-                    preview: None,
                 });
                 if out.len() >= 48 {
                     break;
@@ -126,22 +124,55 @@ pub fn search(provider: Provider, query: &str) -> Result<Vec<Asset>, String> {
                     name: name.into(),
                     image: image.into(),
                     download: download.into(),
-                    preview: None,
                 });
             }
         }
     }
-    for asset in out.iter_mut().take(16) {
-        if !asset.image.is_empty() && trusted_url(&asset.image) {
-            asset.preview = client
-                .get(&asset.image)
-                .send()
-                .ok()
-                .and_then(|r| r.bytes().ok())
-                .map(|b| b.to_vec());
-        }
-    }
     Ok(out)
+}
+
+const USER_AGENT: &str = concat!(
+    "quby-seemdissolver/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/wasnas/quby-seemdissolver)"
+);
+
+pub fn load_previews(
+    assets: &[Asset],
+    publish: impl Fn(String, Option<image::RgbaImage>) -> bool + Sync,
+) {
+    let Ok(client) = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent(USER_AGENT)
+        .build()
+    else {
+        return;
+    };
+    std::thread::scope(|scope| {
+        for lane in 0..assets.len().min(6) {
+            let client = &client;
+            let publish = &publish;
+            scope.spawn(move || {
+                for asset in assets.iter().skip(lane).step_by(6) {
+                    let image = if trusted_url(&asset.image) {
+                        client
+                            .get(&asset.image)
+                            .send()
+                            .and_then(|response| response.error_for_status())
+                            .and_then(|response| response.bytes())
+                            .ok()
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|image| image.into_rgba8())
+                    } else {
+                        None
+                    };
+                    if !publish(asset.id.clone(), image) {
+                        break;
+                    }
+                }
+            });
+        }
+    });
 }
 pub fn download(
     asset: &Asset,
@@ -150,7 +181,7 @@ pub fn download(
 ) -> Result<std::path::PathBuf, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(240))
-        .user_agent("quby-seemdissolver/1.3.1 (https://github.com/wasnas/quby-seemdissolver)")
+        .user_agent(USER_AGENT)
         .build()
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
