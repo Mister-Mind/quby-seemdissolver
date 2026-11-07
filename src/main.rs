@@ -190,11 +190,12 @@ fn blender_executable() -> Result<PathBuf, String> {
 
 fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathBuf, String> {
     let blender = blender_executable()?;
-    let library = std::env::var_os("USERPROFILE")
+    let library = std::env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Documents")
-        .join("Blender Asset Libraries")
+        .filter(|path| path.is_absolute())
+        .ok_or("Could not locate the Windows Local AppData folder for Quby Materials.")?
+        .join("Quby Seemdissolver")
         .join("Quby Materials");
     std::fs::create_dir_all(&library)
         .map_err(|e| format!("Could not create {}: {e}", library.display()))?;
