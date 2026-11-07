@@ -222,7 +222,7 @@ pub fn download(
                 .map_err(|e| e.to_string())?;
             let mut archive =
                 zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-            let mut images = Vec::new();
+            let mut color = None;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
                 let Some(name) = file
@@ -244,23 +244,17 @@ pub fn download(
                 let out = path.join(&name);
                 let mut dest = std::fs::File::create(&out).map_err(|e| e.to_string())?;
                 std::io::copy(&mut file, &mut dest).map_err(|e| e.to_string())?;
-                images.push(out);
+                let stem = out.file_stem().unwrap_or_default().to_string_lossy();
+                let map = stem.rsplit(['_', '-', ' ']).next().unwrap_or_default();
+                if color.is_none()
+                    && ["color", "colour", "basecolor", "albedo", "diffuse", "diff"]
+                        .iter()
+                        .any(|role| map.eq_ignore_ascii_case(role))
+                {
+                    color = Some(out);
+                }
             }
-            if images.is_empty() {
-                return Err("Archive contained no supported images".into());
-            }
-            Ok(images
-                .iter()
-                .find(|p| {
-                    let name = p
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_ascii_lowercase();
-                    name.contains("color") || name.contains("albedo") || name.contains("diff")
-                })
-                .cloned()
-                .unwrap_or_else(|| images[0].clone()))
+            color.ok_or_else(|| format!("ambientCG asset has no color image at {resolution}"))
         }
         Provider::PolyHaven => {
             let data: Value = client
@@ -272,13 +266,7 @@ pub fn download(
                 .json()
                 .map_err(|e| e.to_string())?;
             let mut color = None;
-            for (map, aliases) in [
-                ("Diffuse", &["diff", "color", "col"] as &[_]),
-                ("nor_gl", &["nor_gl"]),
-                ("Rough", &["rough"]),
-                ("AO", &["ao"]),
-                ("Displacement", &["disp"]),
-            ] {
+            for map in ["Diffuse", "nor_gl", "Rough", "AO", "Displacement"] {
                 let Some(file) = data
                     .get(map)
                     .and_then(|v| v.get(resolution))
@@ -308,7 +296,7 @@ pub fn download(
                     .bytes()
                     .map_err(|e| e.to_string())?;
                 std::fs::write(path.join(name), &bytes).map_err(|e| e.to_string())?;
-                if aliases.iter().any(|a| name.contains(a)) {
+                if map == "Diffuse" {
                     color = Some(path.join(name));
                 }
             }
