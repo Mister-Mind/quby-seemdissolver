@@ -1,5 +1,5 @@
 use image::{Rgb, RgbImage};
-pub fn sphere(m: &[RgbImage], angle: f32, directx: bool) -> RgbImage {
+pub fn sphere(m: &[RgbImage], angle: f32, directx: bool, orbit: [f32; 2]) -> RgbImage {
     let size = 448;
     let light = [angle.cos() * 0.8, 0.6, angle.sin() * 0.8];
     let (w, h) = m[0].dimensions();
@@ -12,9 +12,10 @@ pub fn sphere(m: &[RgbImage], angle: f32, directx: bool) -> RgbImage {
             return Rgb([23., 25., 28.].map(|v| (v - 12. * shadow) as u8));
         }
         let pz = (1. - rr).sqrt();
-        let phi = px.atan2(pz);
+        let phi = px.atan2(pz) + orbit[0];
+        let latitude = (py.asin() + orbit[1]).clamp(-1.55, 1.55);
         let u = ((0.5 + phi / std::f32::consts::TAU) * 3.).fract();
-        let v = ((0.5 - py.asin() / std::f32::consts::PI) * 2.).fract();
+        let v = ((0.5 - latitude / std::f32::consts::PI) * 2.).fract();
         let (i, j) = ((u * w as f32) as u32 % w, (v * h as f32) as u32 % h);
         let [nx, ny, nz] = m[1].get_pixel(i, j).0.map(|c| c as f32 / 127.5 - 1.);
         let ny = if directx { -ny } else { ny };

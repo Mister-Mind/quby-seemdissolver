@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+mod library;
 mod material;
 mod preview;
 use eframe::egui::{self, Color32, RichText, TextureHandle, Vec2};
@@ -28,6 +29,8 @@ struct Surface {
 enum Job {
     Surface(Surface),
     Saved(PathBuf),
+    Assets(Vec<library::Asset>),
+    Downloaded(PathBuf),
 }
 #[derive(Clone, Copy)]
 struct Camera {
@@ -74,6 +77,14 @@ struct Studio {
     crop_ratio: usize,
     crop_texture: Option<TextureHandle>,
     french: bool,
+    library_tab: bool,
+    provider: library::Provider,
+    search_text: String,
+    assets: Vec<library::Asset>,
+    selected_asset: Option<usize>,
+    orbit: Vec2,
+    mapping: usize,
+    show_blender_export: bool,
 }
 fn load_source(path: &Path) -> Result<RgbImage, String> {
     let reader = ImageReader::open(path)
@@ -142,6 +153,81 @@ fn export(folder: &Path, name: &str, maps: &[RgbImage], s: &Settings) -> Result<
     }
     Ok(dest)
 }
+fn export_blender(
+    path: &Path,
+    name: &str,
+    maps: &[RgbImage],
+    mapping: usize,
+) -> Result<PathBuf, String> {
+    let root = std::env::temp_dir().join(format!("quby-blender-{}", std::process::id()));
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    for (img, label) in maps.iter().zip([
+        "BaseColor",
+        "Normal",
+        "Roughness",
+        "Height",
+        "AO",
+        "Metallic",
+    ]) {
+        let p = root.join(format!("{label}.png"));
+        img.save(&p).map_err(|e| e.to_string())?;
+        files.push(p);
+    }
+    let script = root.join("make_asset.py");
+    std::fs::write(&script, BLENDER_ASSET_SCRIPT).map_err(|e| e.to_string())?;
+    let blender = [
+        r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe",
+        r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists())
+    .ok_or("Blender 5.1 or newer was not found")?;
+    let mut cmd = std::process::Command::new(blender);
+    cmd.args(["--background", "--factory-startup", "--python"])
+        .arg(&script)
+        .arg("--")
+        .arg(path)
+        .arg(name)
+        .arg(mapping.to_string());
+    for f in files {
+        cmd.arg(f);
+    }
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .rev()
+            .take(700)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect());
+    }
+    Ok(path.to_path_buf())
+}
+const BLENDER_ASSET_SCRIPT: &str = r#"
+import bpy,sys
+from pathlib import Path
+a=sys.argv[sys.argv.index('--')+1:]; out,name,mode,*paths=a
+bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
+m=bpy.data.materials.new(name);m.diffuse_color=(.32,.34,.36,1);m.use_nodes=True
+n=m.node_tree.nodes;l=m.node_tree.links;n.clear();outn=n.new('ShaderNodeOutputMaterial');bs=n.new('ShaderNodeBsdfPrincipled');l.new(bs.outputs['BSDF'],outn.inputs['Surface'])
+coords=n.new('ShaderNodeTexCoord');mapping=n.new('ShaderNodeVectorMath');mapping.operation='SCALE';mapping.inputs[3].default_value=1.0
+if mode=='0': vector=coords.outputs['UV']
+else: vector=coords.outputs['Generated']
+for i,(p,color) in enumerate(zip(paths,[True,False,False,False,False,False])):
+ tex=n.new('ShaderNodeTexImage');tex.image=bpy.data.images.load(p,check_existing=True);tex.image.pack();tex.interpolation='Smart';tex.projection='BOX' if mode in ('1','2') else 'FLAT';tex.projection_blend=.25 if mode=='2' else 0.;tex.image.colorspace_settings.name='sRGB' if color else 'Non-Color';l.new(vector,tex.inputs['Vector'])
+ if i==0:l.new(tex.outputs['Color'],bs.inputs['Base Color'])
+ elif i==1:
+  normal=n.new('ShaderNodeNormalMap');l.new(tex.outputs['Color'],normal.inputs['Color']);l.new(normal.outputs['Normal'],bs.inputs['Normal'])
+ elif i==2:l.new(tex.outputs['Color'],bs.inputs['Roughness'])
+ elif i==3:
+  bump=n.new('ShaderNodeBump');l.new(tex.outputs['Color'],bump.inputs['Height']);l.new(bump.outputs['Normal'],bs.inputs['Normal'])
+ elif i==5:l.new(tex.outputs['Color'],bs.inputs['Metallic'])
+m.asset_mark();m.asset_data.description='Quby seemdissolver PBR material';bpy.ops.wm.save_as_mainfile(filepath=str(Path(out)))
+"#;
 fn texture(ctx: &egui::Context, id: &str, img: &RgbImage) -> TextureHandle {
     ctx.load_texture(
         id,
@@ -216,6 +302,14 @@ impl Studio {
             crop_ratio: 0,
             crop_texture: None,
             french: false,
+            library_tab: false,
+            provider: library::Provider::PolyHaven,
+            search_text: String::new(),
+            assets: Vec::new(),
+            selected_asset: None,
+            orbit: Vec2::ZERO,
+            mapping: 0,
+            show_blender_export: false,
         }
     }
     fn run(
@@ -308,7 +402,12 @@ impl Studio {
             return;
         }
         let img = if self.view == 2 {
-            preview::sphere(&self.surface.maps, self.angle, self.surface.settings.dx)
+            preview::sphere(
+                &self.surface.maps,
+                self.angle,
+                self.surface.settings.dx,
+                [self.orbit.x, self.orbit.y],
+            )
         } else {
             let img = &self.surface.maps[self.layer];
             if img.width().max(img.height()) > 1536 {
@@ -348,6 +447,17 @@ impl eframe::App for Studio {
                         self.status = lang(self.french, "Material ready", "Matériau prêt").into()
                     }
                     Ok(Job::Saved(p)) => self.status = format!("Exported to {}", p.display()),
+                    Ok(Job::Assets(assets)) => {
+                        self.assets = assets;
+                        self.selected_asset = (!self.assets.is_empty()).then_some(0);
+                        self.status = format!("{} textures found", self.assets.len());
+                    }
+                    Ok(Job::Downloaded(path)) => {
+                        self.library_tab = false;
+                        self.crop_tab = false;
+                        self.view = 1;
+                        self.generate(ctx, Some(path));
+                    }
                     Err(e) => self.status = e,
                 }
             }
@@ -434,6 +544,19 @@ impl eframe::App for Studio {
                             });
                         }
                     }
+                    if ui
+                        .add_enabled(
+                            !busy && !dirty,
+                            egui::Button::new(lang(
+                                self.french,
+                                "Export as Blender asset",
+                                "Exporter comme asset Blender",
+                            )),
+                        )
+                        .clicked()
+                    {
+                        self.show_blender_export = true;
+                    }
                 });
             });
             ui.add_space(4.);
@@ -456,6 +579,63 @@ impl eframe::App for Studio {
             }
             ui.painter().add(egui::Shape::mesh(mesh));
         });
+        if self.show_blender_export {
+            egui::Window::new(lang(
+                self.french,
+                "Blender material asset",
+                "Asset matériau Blender",
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(lang(
+                    self.french,
+                    "Choose texture mapping",
+                    "Choisis le type de mapping",
+                ));
+                egui::ComboBox::from_id_salt("blender-mapping")
+                    .selected_text(["UV", "Cube projection", "Triplanar projection"][self.mapping])
+                    .show_ui(ui, |ui| {
+                        for (i, label) in ["UV", "Cube projection", "Triplanar projection"]
+                            .iter()
+                            .enumerate()
+                        {
+                            ui.selectable_value(&mut self.mapping, i, *label);
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button(lang(self.french, "Cancel", "Annuler")).clicked() {
+                        self.show_blender_export = false;
+                    }
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(lang(
+                                self.french,
+                                "Save .blend",
+                                "Enregistrer .blend",
+                            ))
+                            .fill(ACCENT),
+                        )
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Blender file", &["blend"])
+                            .set_file_name("QubyMaterial.blend")
+                            .save_file()
+                        {
+                            let maps = self.surface.maps.clone();
+                            let name = self.surface.name.clone();
+                            let mapping = self.mapping;
+                            self.show_blender_export = false;
+                            self.run(ctx, "Creating Blender material asset…", move || {
+                                export_blender(&path, &name, &maps, mapping).map(Job::Saved)
+                            });
+                        }
+                    }
+                });
+            });
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if busy {
@@ -651,16 +831,39 @@ impl eframe::App for Studio {
                         .clicked()
                     {
                         self.crop_tab = false;
+                        self.library_tab = false;
                     }
                     if ui
                         .selectable_label(self.crop_tab, lang(self.french, "Crop", "Recadrage"))
                         .clicked()
                     {
                         self.crop_tab = true;
+                        self.library_tab = false;
                     }
+                    if ui.selectable_label(self.library_tab,lang(self.french,"Library","Bibliothèque")).clicked(){self.library_tab=true;self.crop_tab=false;}
                 });
                 ui.separator();
-                if self.crop_tab {
+                if self.library_tab {
+                    ui.horizontal(|ui|{
+                        ui.heading(lang(self.french,"Texture library","Bibliothèque de textures"));
+                        egui::ComboBox::from_id_salt("library-provider").selected_text(match self.provider{library::Provider::PolyHaven=>"Poly Haven",library::Provider::AmbientCg=>"ambientCG"}).show_ui(ui,|ui|{
+                            ui.selectable_value(&mut self.provider,library::Provider::PolyHaven,"Poly Haven");
+                            ui.selectable_value(&mut self.provider,library::Provider::AmbientCg,"ambientCG");
+                        });
+                        ui.add(egui::TextEdit::singleline(&mut self.search_text).hint_text(lang(self.french,"Search materials","Rechercher des textures")).desired_width(190.));
+                        if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Search","Rechercher"))).clicked(){let provider=self.provider;let query=self.search_text.clone();self.run(ctx,"Searching texture libraries…",move||library::search(provider,&query).map(Job::Assets));}
+                    });
+                    ui.label(RichText::new(lang(self.french,"Powered by Poly Haven · ambientCG materials are CC0","Données Poly Haven · matériaux ambientCG sous licence CC0")).small().color(MUTED));
+                    let assets=self.assets.clone();
+                    egui::ScrollArea::vertical().show(ui,|ui|{
+                        for (index,asset) in assets.iter().enumerate(){ui.group(|ui|{ui.horizontal(|ui|{
+                            if let Some(bytes)=&asset.preview{if let Ok(img)=image::load_from_memory(bytes){let img=img.thumbnail(128,96).to_rgb8();let tex=texture(ctx,&format!("asset-preview-{}",asset.id),&img);ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::new(100.,75.)));}}
+                            ui.vertical(|ui|{ui.strong(&asset.name);ui.small(&asset.id);if ui.selectable_label(self.selected_asset==Some(index),lang(self.french,"Preview","Aperçu")).clicked(){self.selected_asset=Some(index);}
+                                if ui.add_enabled(!busy,egui::Button::new(lang(self.french,"Download & tile","Télécharger et carreler"))).clicked(){let asset=asset.clone();let folder=std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_|std::env::temp_dir()).join("Downloads").join("quby-seemdissolver").join("Textures");self.run(ctx,"Downloading texture maps…",move||library::download(&asset,&folder).map(Job::Downloaded));}
+                            });
+                        });});}
+                    });
+                } else if self.crop_tab {
                     caption(
                         ui,
                         lang(self.french, "CROP SOURCE IMAGE", "RECADRER L’IMAGE SOURCE"),
@@ -905,7 +1108,7 @@ impl eframe::App for Studio {
                         ));
                     }
                     self.refresh(ctx);
-                    let tex = self.texture.as_ref().unwrap();
+                    let tex = self.texture.as_ref().unwrap().clone();
                     let (rect, response) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), (ui.available_height() - 94.).max(60.)),
                         egui::Sense::click_and_drag(),
@@ -921,6 +1124,11 @@ impl eframe::App for Studio {
                             );
                         }
                     }
+                    if self.view == 2 && ui.input(|i|i.pointer.button_down(egui::PointerButton::Middle)) {
+                        let delta=ui.input(|i|i.pointer.delta());
+                        self.orbit+=Vec2::new(delta.x*0.012,delta.y*0.012);
+                        self.texture=None;
+                    }
                     if response.dragged() {
                         camera.offset += ui.input(|i| i.pointer.delta());
                     }
@@ -928,11 +1136,7 @@ impl eframe::App for Studio {
                         *camera = Camera::default();
                     }
                     camera.constrain(size, rect.size());
-                    response.on_hover_text(lang(
-                        self.french,
-                        "Wheel to zoom · drag to pan · double-click to fit",
-                        "Molette pour zoomer · glisser pour déplacer · double-clic pour ajuster",
-                    ));
+                response.on_hover_text(if self.view==2 {lang(self.french,"Middle-drag to orbit · wheel to zoom · double-click to fit","Clic-molette pour orbiter · molette pour zoomer · double-clic pour ajuster")} else {lang(self.french,"Wheel to zoom · drag to pan · double-click to fit","Molette pour zoomer · glisser pour déplacer · double-clic pour ajuster")});
                     let painter = ui.painter_at(rect);
                     let target = egui::Rect::from_center_size(
                         rect.center() + camera.offset,

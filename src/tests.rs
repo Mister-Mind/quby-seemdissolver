@@ -63,8 +63,8 @@ fn convention_and_flat_surface() {
         assert!((a[1] as i16 + b[1] as i16 - 255).abs() <= 1);
     }
     assert_ne!(
-        preview::sphere(&gl, 0.2, false),
-        preview::sphere(&gl, 2.8, false)
+        preview::sphere(&gl, 0.2, false, [0., 0.]),
+        preview::sphere(&gl, 2.8, false, [0., 0.])
     );
 }
 

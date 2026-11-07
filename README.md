@@ -43,3 +43,13 @@ Ouvre l’onglet **Recadrage** pour déplacer ou redimensionner la zone de séle
 ## Interface language
 
 Use the compact EN/FR button in the header to switch languages. English is selected at launch.
+
+## Texture library
+
+Browse and download materials from Poly Haven and ambientCG. Search results include preview images. Downloads go to `Downloads/quby-seemdissolver/Textures`. Select **Download & tile** to open the downloaded color map in Material and build a tile preview. The catalogs need an internet connection. Poly Haven is credited in the app as required by its API terms. ambientCG materials are CC0.
+
+## Blender material assets
+
+Choose **Export as Blender asset** to save a `.blend` material asset. Select UV, cube projection, or triplanar projection. Blender 5.1 or newer must be installed. Image maps are packed into the blend file.
+
+Middle-drag the lit sphere to orbit its material preview.
