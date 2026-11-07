@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 mod library;
 mod material;
+mod owned;
 mod preview;
 use eframe::egui::{self, Color32, RichText, TextureHandle, Vec2};
 use image::{ImageReader, RgbImage};
@@ -32,6 +33,15 @@ enum Job {
     Saved(PathBuf),
     Assets(Vec<library::Asset>),
     Downloaded(PathBuf),
+    Removed(PathBuf),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Material,
+    Crop,
+    Library,
+    MyMaterials,
 }
 #[derive(Clone, Copy)]
 struct Camera {
@@ -74,12 +84,13 @@ struct Studio {
     status_error: bool,
     observed_controls: Settings,
     regen_at: Option<std::time::Instant>,
-    crop_tab: bool,
+    tab: Tab,
     crop_rect: egui::Rect,
     crop_ratio: usize,
     crop_texture: Option<TextureHandle>,
     french: bool,
-    library_tab: bool,
+    owned_materials: Vec<PathBuf>,
+    pending_removal: Option<PathBuf>,
     provider: library::Provider,
     search_text: String,
     assets: Vec<library::Asset>,
@@ -190,13 +201,7 @@ fn blender_executable() -> Result<PathBuf, String> {
 
 fn export_blender(name: &str, maps: &[RgbImage], mapping: usize) -> Result<PathBuf, String> {
     let blender = blender_executable()?;
-    let library = std::env::var_os("LOCALAPPDATA")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or("Could not locate the Windows Local AppData folder for Quby Materials.")?
-        .join("Quby Seemdissolver")
-        .join("Quby Materials");
+    let library = owned::library_path()?;
     std::fs::create_dir_all(&library)
         .map_err(|e| format!("Could not create {}: {e}", library.display()))?;
     let catalog = "bfb8ef08-9dd7-4f5a-bdb6-c3984b32ccfa";
@@ -384,12 +389,13 @@ impl Studio {
             status_error: false,
             observed_controls: settings.clone(),
             regen_at: None,
-            crop_tab: false,
+            tab: Tab::Material,
             crop_rect: egui::Rect::from_min_max(egui::pos2(0.08, 0.08), egui::pos2(0.92, 0.92)),
             crop_ratio: 0,
             crop_texture: None,
             french: false,
-            library_tab: false,
+            owned_materials: Vec::new(),
+            pending_removal: None,
             provider: library::Provider::PolyHaven,
             search_text: String::new(),
             assets: Vec::new(),
@@ -402,6 +408,97 @@ impl Studio {
             resolution: "2k".into(),
         }
     }
+    fn refresh_owned_materials(&mut self) {
+        match owned::list() {
+            Ok(materials) => self.owned_materials = materials,
+            Err(error) => {
+                self.status = error;
+                self.status_error = true;
+            }
+        }
+    }
+
+    fn owned_materials_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
+        ui.horizontal(|ui| {
+            ui.heading(lang(self.french, "My Materials", "Mes matériaux"));
+            if ui
+                .button(lang(self.french, "Refresh", "Actualiser"))
+                .clicked()
+            {
+                self.pending_removal = None;
+                self.refresh_owned_materials();
+            }
+        });
+        ui.label(lang(
+            self.french,
+            "Blender assets exported to Quby Materials.",
+            "Assets Blender exportés vers Quby Materials.",
+        ));
+        if self.owned_materials.is_empty() {
+            ui.label(lang(
+                self.french,
+                "No exported materials yet.",
+                "Aucun matériau exporté pour le moment.",
+            ));
+            return;
+        }
+
+        let mut recycle = None;
+        egui::ScrollArea::vertical()
+            .id_salt("owned-materials")
+            .show(ui, |ui| {
+                for path in &self.owned_materials {
+                    let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                    ui.push_id(path, |ui| {
+                        ui.horizontal(|ui| {
+                            if self.pending_removal.as_ref() == Some(path) {
+                                if ui.button(lang(self.french, "Cancel", "Annuler")).clicked() {
+                                    self.pending_removal = None;
+                                }
+                                let confirm = egui::Button::new(
+                                    RichText::new(lang(
+                                        self.french,
+                                        "Move to Recycle Bin",
+                                        "Mettre à la corbeille",
+                                    ))
+                                    .color(ERROR),
+                                );
+                                if ui.add_enabled(!busy, confirm).clicked() {
+                                    recycle = Some(path.clone());
+                                }
+                            } else if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(lang(self.french, "Delete…", "Supprimer…")),
+                                )
+                                .clicked()
+                            {
+                                self.pending_removal = Some(path.clone());
+                            }
+                            ui.add(egui::Label::new(name.as_ref()).truncate())
+                                .on_hover_text(path.display().to_string());
+                        });
+                    });
+                    ui.separator();
+                }
+            });
+        if let Some(path) = recycle {
+            self.pending_removal = None;
+            self.run(
+                ctx,
+                lang(
+                    self.french,
+                    "Removing material…",
+                    "Suppression du matériau…",
+                ),
+                move || {
+                    owned::recycle(&path)?;
+                    Ok(Job::Removed(path))
+                },
+            );
+        }
+    }
+
     fn run(
         &mut self,
         ctx: &egui::Context,
@@ -538,7 +635,20 @@ impl eframe::App for Studio {
                         self.chips.clear();
                         self.status = lang(self.french, "Material ready", "Matériau prêt").into()
                     }
-                    Ok(Job::Saved(p)) => self.status = format!("Exported to {}", p.display()),
+                    Ok(Job::Saved(p)) => {
+                        self.status = format!("Exported to {}", p.display());
+                        if self.tab == Tab::MyMaterials {
+                            self.refresh_owned_materials();
+                        }
+                    }
+                    Ok(Job::Removed(path)) => {
+                        self.owned_materials.retain(|asset| asset != &path);
+                        self.status = format!(
+                            "{} {}",
+                            lang(self.french, "Removed", "Supprimé"),
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                    }
                     Ok(Job::Assets(assets)) => {
                         self.assets = assets;
                         self.library_thumbs.clear();
@@ -558,8 +668,7 @@ impl eframe::App for Studio {
                         self.status = format!("{} textures found", self.assets.len());
                     }
                     Ok(Job::Downloaded(path)) => {
-                        self.library_tab = false;
-                        self.crop_tab = false;
+                        self.tab = Tab::Material;
                         self.view = 1;
                         self.generate(ctx, Some(path));
                     }
@@ -955,24 +1064,27 @@ impl eframe::App for Studio {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(!self.crop_tab, lang(self.french, "Material", "Matériau"))
-                        .clicked()
-                    {
-                        self.crop_tab = false;
-                        self.library_tab = false;
+                    for (tab, english, french) in [
+                        (Tab::Material, "Material", "Matériau"),
+                        (Tab::Crop, "Crop", "Recadrage"),
+                        (Tab::Library, "Library", "Bibliothèque"),
+                        (Tab::MyMaterials, "My Materials", "Mes matériaux"),
+                    ] {
+                        if ui.selectable_label(self.tab == tab, lang(self.french, english, french)).clicked()
+                            && self.tab != tab
+                        {
+                            self.tab = tab;
+                            self.pending_removal = None;
+                            if tab == Tab::MyMaterials {
+                                self.refresh_owned_materials();
+                            }
+                        }
                     }
-                    if ui
-                        .selectable_label(self.crop_tab, lang(self.french, "Crop", "Recadrage"))
-                        .clicked()
-                    {
-                        self.crop_tab = true;
-                        self.library_tab = false;
-                    }
-                    if ui.selectable_label(self.library_tab,lang(self.french,"Library","Bibliothèque")).clicked(){self.library_tab=true;self.crop_tab=false;}
                 });
                 ui.separator();
-                if self.library_tab {
+                if self.tab == Tab::MyMaterials {
+                    self.owned_materials_ui(ui, ctx, busy);
+                } else if self.tab == Tab::Library {
                     ui.horizontal(|ui| {
                         ui.heading(lang(self.french, "Texture library", "Bibliothèque de textures"));
                         egui::ComboBox::from_id_salt("library-provider")
@@ -1049,7 +1161,7 @@ impl eframe::App for Studio {
                         let folder=std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_|std::env::temp_dir()).join("Downloads").join("quby-seemdissolver").join("Textures");
                         self.run(ctx,lang(self.french,"Downloading texture maps…","Téléchargement des textures…"),move||library::download(&asset,&folder,&resolution).map(Job::Downloaded));
                     }
-                } else if self.crop_tab {
+                } else if self.tab == Tab::Crop {
                     caption(
                         ui,
                         lang(self.french, "CROP SOURCE IMAGE", "RECADRER L’IMAGE SOURCE"),

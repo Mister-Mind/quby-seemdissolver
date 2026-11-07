@@ -55,3 +55,5 @@ Choose **Export as Blender asset**, select UV, cube projection, or triplanar pro
 The **Quby Material** shader group exposes **Texture Scale**, **Random Rotation**, **Bump Strength**, **Bump Size**, **Roughness Multiplier**, and **Metallic Multiplier**. Random Rotation blends neighboring rotated samples to break up repeated patterns. Set it to 0 for regular tiling. The height map supplies bump so the relief follows the same rotation as the color. For a portable Blender install, set `BLENDER_PATH` to the full path to `blender.exe`.
 
 Middle-drag the lit sphere to orbit its material preview.
+
+Open **My Materials** to list assets in the Quby Materials library. Choose **Delete…** and confirm **Move to Recycle Bin** to remove an export. If Blender is open, refresh its Asset Browser to update the list.
